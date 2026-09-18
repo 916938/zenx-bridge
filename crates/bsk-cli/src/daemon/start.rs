@@ -4,7 +4,7 @@
 //! * `--foreground` — run the daemon loop in the current process and
 //!   inherit stdio. Used by tests and `--foreground` users.
 //! * default — fork-and-detach a child copy of the same binary, wait
-//!   for it to write a valid `daemon.json`, then return success.
+//!   for verified IPC readiness within the startup deadline, then return success.
 //!
 //! Detachment uses a hidden `BSK_DAEMONIZED=1` env handoff: when the
 //! parent spawns the child it sets the env var; the child sees it on
@@ -22,6 +22,7 @@ use bsk_protocol::StatusResult;
 use tracing::{debug, info, warn};
 
 use crate::cli::daemon::StartArgs;
+use crate::cli::ensure_daemon::SPAWN_DEADLINE;
 use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
@@ -30,6 +31,14 @@ use crate::daemon::{
     state::{DaemonState, PROTOCOL_VERSION},
     ws,
 };
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+type DaemonChild = crate::windows_process::Process;
+#[cfg(not(windows))]
+type DaemonChild = std::process::Child;
 
 /// Internal env-var contract: the parent sets this on the spawned child
 /// to indicate "you are the daemon, detach yourself and run".
@@ -130,6 +139,7 @@ pub fn run_start(args: StartArgs) -> Result<()> {
         return run_foreground(cfg);
     }
 
+    let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
         let status = daemon.status;
         validate_existing_start(&args, &status)?;
@@ -141,17 +151,77 @@ pub fn run_start(args: StartArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Parent: spawn ourselves detached and wait for ready.
-    spawn_detached(&args)?;
-    let daemon = probe::wait_for_ready(Duration::from_secs(3))?;
-    if let Some(port) = args.port.filter(|port| *port != 0) {
-        anyhow::ensure!(
-            daemon.status.ws_port == port,
-            "daemon started on ws port {}, expected {port}",
-            daemon.status.ws_port
-        );
-    }
+    start_background(&args, deadline)?;
     Ok(())
+}
+
+/// Shared explicit/automatic startup. Keep ownership of the child until IPC
+/// readiness is verified, without an intermediate launcher or captured pipe.
+pub(crate) fn start_background(
+    args: &StartArgs,
+    deadline: Instant,
+) -> Result<daemon_info::DaemonInfo> {
+    anyhow::ensure!(
+        Instant::now() < deadline,
+        "daemon startup deadline exceeded"
+    );
+    let exe = std::env::current_exe().context("locate daemon executable")?;
+    let mut child = spawn_detached_at(&exe, args, None)?;
+    let result = probe::wait_for_ready(deadline.saturating_duration_since(Instant::now()));
+    let daemon = match result {
+        Ok(daemon) => daemon,
+        Err(err) => {
+            let exit = child.try_wait().ok().flatten();
+            stop_starting_child(&mut child);
+            return Err(err.context(match exit {
+                Some(status) => format!("daemon child exited during startup: {status}"),
+                None => "daemon child failed to become ready".into(),
+            }));
+        }
+    };
+    if daemon.info.pid != child.id() {
+        // Another concurrent starter won the lock. Never stop that daemon.
+        stop_starting_child(&mut child);
+    }
+    if let Some(port) = args.port.filter(|port| *port != 0) {
+        if daemon.status.ws_port != port {
+            if daemon.info.pid == child.id() {
+                stop_starting_child(&mut child);
+            }
+            anyhow::bail!(
+                "daemon started on ws port {}, expected {port}",
+                daemon.status.ws_port
+            );
+        }
+    }
+    disown_daemon(child);
+    Ok(daemon.info)
+}
+
+// Automatic startup now makes the daemon a direct child of a business CLI.
+// That CLI may keep running after an idle exit or update, so reap exited Unix
+// children without making the command wait for the daemon's lifetime.
+#[cfg(unix)]
+fn disown_daemon(mut child: DaemonChild) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+#[cfg(not(unix))]
+fn disown_daemon(child: DaemonChild) {
+    drop(child);
+}
+
+fn stop_starting_child(child: &mut DaemonChild) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if let Err(err) = child.kill() {
+        warn!(error = %err, "failed to stop daemon child after startup failure");
+        return;
+    }
+    let _ = child.wait();
 }
 
 /// `bsk daemon stop` entrypoint.
@@ -258,6 +328,13 @@ fn wait_for_stopped(expected: &daemon_info::DaemonInfo, timeout: Duration) -> Re
 pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
     paths::ensure_bsk_home()?;
     let _log_guard = init_tracing();
+    #[cfg(windows)]
+    info!(
+        pid = std::process::id(),
+        background = is_daemonized_child(),
+        in_job = ?crate::windows_process::current_process_in_job(),
+        "Windows daemon process started"
+    );
     let lock = lockfile::acquire().context("acquire daemon lock")?;
     info!(?lock, "daemon lock acquired");
 
@@ -718,7 +795,7 @@ pub(crate) fn spawn_update_check_task(
                     // runs when it was captured.
                     if let Some(exe) = &exe_path {
                         match restart_start_args(&state.config).and_then(|args| {
-                            spawn_detached_at(exe, &args, Some(std::process::id()))
+                            spawn_detached_at(exe, &args, Some(std::process::id())).map(drop)
                         }) {
                             Ok(()) => {
                                 info!(
@@ -921,8 +998,8 @@ fn detach_stdio() -> Result<()> {
 
 #[cfg(windows)]
 fn detach_stdio() -> Result<()> {
-    // On Windows the parent spawned us with DETACHED_PROCESS so stdio
-    // is already detached. Nothing extra to do here.
+    // The parent supplied dedicated NUL handles with an explicit inheritance
+    // list and verified Job breakaway before resuming us.
     Ok(())
 }
 
@@ -931,26 +1008,25 @@ fn detach_stdio() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn spawn_detached(args: &StartArgs) -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
-    spawn_detached_at(&exe, args, None)
-}
-
 /// Spawn a detached daemon child running the binary at `exe`. When
 /// `predecessor_pid` is set, the child first waits for that process to
 /// exit ([`DAEMON_REPLACEMENT_WAIT_ENV`]) — used by the auto-update
 /// self-restart, where the on-disk binary has already been replaced, so
 /// the child runs the new version.
 #[cfg(unix)]
-fn spawn_detached_at(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) -> Result<()> {
+fn spawn_detached_at(
+    exe: &Path,
+    args: &StartArgs,
+    predecessor_pid: Option<u32>,
+) -> Result<DaemonChild> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(exe);
     apply_start_args(&mut cmd, args);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .env(DAEMONIZED_ENV, "1");
+        .env(DAEMONIZED_ENV, "1")
+        .env_remove(DAEMON_REPLACEMENT_WAIT_ENV);
     if let Some(pid) = predecessor_pid {
         cmd.env(DAEMON_REPLACEMENT_WAIT_ENV, pid.to_string());
     }
@@ -961,46 +1037,24 @@ fn spawn_detached_at(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>)
             Ok(())
         });
     }
-    let child = cmd.spawn().context("spawn detached daemon child")?;
-    drop(child); // parent immediately disowns; child runs independently
-    Ok(())
+    cmd.spawn().context("spawn detached daemon child")
 }
 
 #[cfg(windows)]
-fn spawn_detached(args: &StartArgs) -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
-    spawn_detached_at(&exe, args, None)
-}
-
-/// Windows counterpart of the unix [`spawn_detached_at`]; see its docs.
-#[cfg(windows)]
-fn spawn_detached_at(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    let mut cmd = std::process::Command::new(exe);
-    apply_start_args(&mut cmd, args);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env(DAEMONIZED_ENV, "1");
-    if let Some(pid) = predecessor_pid {
-        cmd.env(DAEMON_REPLACEMENT_WAIT_ENV, pid.to_string());
-    }
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    let _child = cmd.spawn().context("spawn detached daemon child")?;
-    Ok(())
+fn spawn_detached_at(
+    exe: &Path,
+    args: &StartArgs,
+    predecessor_pid: Option<u32>,
+) -> Result<DaemonChild> {
+    windows::spawn(exe, args, predecessor_pid)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn spawn_detached(_args: &StartArgs) -> Result<()> {
-    Err(anyhow::anyhow!(
-        "detached daemon spawn is not supported on this platform"
-    ))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn spawn_detached_at(_exe: &Path, _args: &StartArgs, _predecessor_pid: Option<u32>) -> Result<()> {
+fn spawn_detached_at(
+    _exe: &Path,
+    _args: &StartArgs,
+    _predecessor_pid: Option<u32>,
+) -> Result<DaemonChild> {
     Err(anyhow::anyhow!(
         "detached daemon spawn is not supported on this platform"
     ))
@@ -1095,6 +1149,29 @@ fn send_kill(_pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn disowned_child_is_reaped_while_the_launcher_stays_alive() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        disown_daemon(child);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        // kill(pid, 0) also sees zombies; disappearance proves wait() reaped it.
+        while lockfile::pid_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "disowned child remained a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn stopping_rejects_replacement_metadata_with_or_without_a_held_lock() {

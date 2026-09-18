@@ -55,6 +55,9 @@ jobs:
       - name: Run Windows audit and browser interaction policy tests
         run: cargo test -p bsk --test audit_ws --test interaction_preferences --locked
 
+      - name: Run Windows daemon startup and Job lifetime tests
+        run: cargo test -p bsk --test windows_daemon_start --locked -- --test-threads=1
+
       - name: Run Windows process liveness tests
         run: cargo test -p bsk --lib --locked daemon::lockfile::tests
 
