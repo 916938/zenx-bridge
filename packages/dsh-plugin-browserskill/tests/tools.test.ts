@@ -474,8 +474,8 @@ describe("session.stop / list", () => {
       sessions: { sessionId: string; current: boolean }[];
     };
     expect(value.sessions).toEqual([
-      { sessionId: "s1", browserInstanceId: "chrome-1", current: false },
-      { sessionId: "s2", browserInstanceId: "chrome-1", current: true },
+      { sessionId: "s1", browserInstanceId: "chrome-1", current: false, state: "active" },
+      { sessionId: "s2", browserInstanceId: "chrome-1", current: true, state: "active" },
     ]);
     // Registry-only: listing must not call the daemon at all.
     expect(calls.some((c) => c.args.join(" ").startsWith("session list"))).toBe(false);

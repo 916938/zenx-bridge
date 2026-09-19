@@ -6,7 +6,7 @@ function fixture(windowIds: number[], options: { failing?: number[] } = {}) {
   const removed: number[] = [];
   let nextWindow = 100;
   const agentWindow = {
-    create: vi.fn(async () => nextWindow++),
+    create: vi.fn(async () => ({ windowId: nextWindow++, initialTabIds: [] })),
     remove: vi.fn(async () => {}),
     ensureActiveTab: vi.fn(async () => 1),
   };

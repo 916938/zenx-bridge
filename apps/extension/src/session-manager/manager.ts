@@ -258,17 +258,25 @@ export class SessionManager {
     throwIfSessionStartAborted(opts.signal);
 
     let windowId: number | null = null;
+    const agentCreatedTabs = new Set<number>();
     try {
       const { signal: _signal, ...createOptions } = opts;
       this.allocatingAgentWindows += 1;
       try {
-        windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
+        const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
+        windowId = created.windowId;
         this.pendingAgentWindows.add(windowId);
+        for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
       } finally {
         this.allocatingAgentWindows -= 1;
       }
       throwIfSessionStartAborted(opts.signal);
-      const homeTabId = await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
+      const homeTabId = await this.agentWindow.ensureActiveTab(
+        windowId,
+        AGENT_WINDOW_HOME,
+        agentCreatedTabs,
+      );
+      agentCreatedTabs.add(homeTabId);
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
@@ -277,10 +285,10 @@ export class SessionManager {
         agentWindowId: windowId,
         refStore: new RefStore(),
         borrowedTabs: new Map(),
-        // The home tab is the session's first explicit claim. Every other
-        // tab remains free until `tab_create` or `tab_borrow` identifies it
-        // by its concrete Chrome tab id.
-        agentCreatedTabs: new Set([homeTabId]),
+        // Capture ownership at creation, before initialization can fail.
+        // Later tabs remain free until `tab_create` or `tab_borrow` identifies
+        // them by their concrete Chrome tab id.
+        agentCreatedTabs,
         createdAtMs: this.now(),
       };
       this.sessions.set(sessionId, ctx);
@@ -293,6 +301,19 @@ export class SessionManager {
           await this.agentWindow.remove(windowId);
           this.pendingAgentWindows.delete(windowId);
         } catch (cleanupError) {
+          // The daemon may retry stop after a failed startup rollback. Retain
+          // the exact window handle until closure is confirmed.
+          const pending: SessionContext = {
+            ...(this.remote() ? { remote: true } : {}),
+            sessionId,
+            agentWindowId: windowId,
+            refStore: new RefStore(),
+            borrowedTabs: new Map(),
+            agentCreatedTabs,
+            createdAtMs: this.now(),
+          };
+          this.sessions.set(sessionId, pending);
+          this.windowIndex.set(windowId, sessionId);
           throw new SessionStartCleanupError(windowId, startupError, cleanupError);
         }
       }

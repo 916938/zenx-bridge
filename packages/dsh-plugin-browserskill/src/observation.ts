@@ -203,7 +203,7 @@ export class ObservationService {
     this.put({
       sessionId,
       ...(url !== undefined ? { url } : {}),
-      action: "idle",
+      action: this.restingAction(sessionId),
       since: this.scheduler.now(),
       ...(dshSessionIds.length > 0 ? { dshSessionIds } : {}),
     });
@@ -281,7 +281,11 @@ export class ObservationService {
     if (entry === undefined || entry.dead === true) return;
     const now = this.scheduler.now();
     this.lastActivity.set(sessionId, now);
-    const next: SessionObservation = { ...entry, action: "idle", since: now };
+    const next: SessionObservation = {
+      ...entry,
+      action: this.restingAction(sessionId),
+      since: now,
+    };
     if (error !== undefined) next.lastError = error;
     else delete next.lastError;
     this.put(next);
@@ -321,6 +325,7 @@ export class ObservationService {
    */
   async stopSession(sessionId: string, signal?: AbortSignal): Promise<boolean> {
     if (!this.deps.registry.isOwned(sessionId)) return false;
+    this.deps.registry.markForCleanup(sessionId);
     const releaseForeground = this.acquireForeground(sessionId);
     let actionError: string | undefined;
     this.beginAction(sessionId, "stopping");
@@ -408,12 +413,18 @@ export class ObservationService {
     const entry = this.observations.get(sessionId);
     return (
       this.deps.options.enabled &&
+      this.deps.registry.isUsable(sessionId) &&
       !this.disposed &&
       this.thumbnailViewers > 0 &&
       !this.foregroundDepth.has(sessionId) &&
       entry !== undefined &&
       entry.dead !== true
     );
+  }
+
+  private restingAction(sessionId: string): string {
+    const state = this.deps.registry.stateFor(sessionId);
+    return state === "cleanup" ? "awaiting cleanup" : state === "starting" ? "starting" : "idle";
   }
 
   /** Schedule the next capture for a session; `delayMs` 0 means "as soon as the event loop allows". */

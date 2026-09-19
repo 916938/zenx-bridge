@@ -12,7 +12,7 @@ function fixture() {
   } as chrome.tabs.Tab;
   const win = { id: 20, type: "normal", focused: true } as chrome.windows.Window;
   const agentWindow = {
-    create: vi.fn(async () => 100),
+    create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
     remove: vi.fn(async () => {}),
     ensureActiveTab: vi.fn(async () => 1),
   };
@@ -52,7 +52,7 @@ describe("无会话用户标签", () => {
     let rejectCreate!: (error: Error) => void;
     f.agentWindow.create.mockImplementation(
       () =>
-        new Promise<number>((_, reject) => {
+        new Promise((_, reject) => {
           rejectCreate = reject;
         }),
     );
@@ -81,7 +81,8 @@ describe("无会话用户标签", () => {
     f.agentWindow.remove.mockRejectedValue(new Error("cleanup failed"));
     await expect(f.manager.start("other")).rejects.toThrow();
     f.setTab({ windowId: 100 });
-    expect(f.manager.list()).toEqual([]);
+    // 清理失败时会话被保留为待清理状态，以便 daemon 重试 stop；但不得出现在常规会话列表中。
+    expect(f.manager.list()).toHaveLength(1);
     expect(f.manager.isAgentWindow(100)).toBe(true);
     expect(await f.call("list", { scope: "user" })).toEqual({ tabs: [] });
   });
@@ -91,8 +92,8 @@ describe("无会话用户标签", () => {
     let finish!: (id: number) => void;
     f.agentWindow.create.mockImplementation(
       () =>
-        new Promise<number>((resolve) => {
-          finish = resolve;
+        new Promise((resolve) => {
+          finish = (id) => resolve({ windowId: id, initialTabIds: [] });
         }),
     );
     let starting!: ReturnType<SessionManager["start"]>;
