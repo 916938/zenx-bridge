@@ -30,6 +30,16 @@ which distribution you are running. See `docs/UPSTREAM_SYNC.md`.
   Remote/server mode is carried for mergeability but is **not supported** by
   this distribution — the supported and default mode is loopback only
 
+## [Unreleased]
+
+### Fixed
+
+- IPC protocol: an explicit `null` result (for example the daemon's
+  `serde_json::to_value(..).unwrap_or(Value::Null)` fallback) is now decoded as a
+  success body instead of being rejected as an ambiguous frame; the daemon no
+  longer silently degrades result serialisation failures to `null` and returns a
+  structured `protocol_error` instead
+
 ## [0.3.0] - 2026-09-16
 
 ### Added
