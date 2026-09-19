@@ -26,14 +26,9 @@ use windows_sys::Win32::System::Threading::{
 pub(crate) struct Process {
     handle: OwnedHandle,
     thread: OwnedHandle,
-    pid: u32,
 }
 
 impl Process {
-    pub(crate) fn id(&self) -> u32 {
-        self.pid
-    }
-
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         // SAFETY: the owned process handle remains valid for both calls.
         match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } {
@@ -185,7 +180,6 @@ pub(crate) fn spawn(
     Ok(Process {
         handle: unsafe { OwnedHandle::from_raw_handle(process.hProcess) },
         thread: unsafe { OwnedHandle::from_raw_handle(process.hThread) },
-        pid: process.dwProcessId,
     })
 }
 

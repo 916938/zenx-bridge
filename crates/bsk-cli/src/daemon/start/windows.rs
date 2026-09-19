@@ -58,7 +58,7 @@ pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) 
 
 /// Quote argv directly for the Windows CRT, without invoking a shell. Preserve
 /// UTF-16 paths, embedded quotes and backslashes before a closing quote.
-fn command_line<'a>(args: impl Iterator<Item = &'a OsStr>) -> OsString {
+pub(super) fn command_line<'a>(args: impl Iterator<Item = &'a OsStr>) -> OsString {
     let mut result = Vec::new();
     for arg in args {
         if !result.is_empty() {

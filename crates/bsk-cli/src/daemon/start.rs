@@ -155,8 +155,8 @@ pub fn run_start(args: StartArgs) -> Result<()> {
     Ok(())
 }
 
-/// Shared explicit/automatic startup. Keep ownership of the child until IPC
-/// readiness is verified, without an intermediate launcher or captured pipe.
+/// Shared explicit/automatic startup, without an intermediate launcher or
+/// captured pipe. The deadline limits this caller's wait, not daemon lifetime.
 pub(crate) fn start_background(
     args: &StartArgs,
     deadline: Instant,
@@ -166,35 +166,41 @@ pub(crate) fn start_background(
         "daemon startup deadline exceeded"
     );
     let exe = std::env::current_exe().context("locate daemon executable")?;
-    let mut child = spawn_detached_at(&exe, args, None)?;
+    let child = spawn_detached_at(&exe, args, None)?;
+    wait_for_background(child, args, deadline)
+}
+
+fn wait_for_background(
+    mut child: DaemonChild,
+    args: &StartArgs,
+    deadline: Instant,
+) -> Result<daemon_info::DaemonInfo> {
     let result = probe::wait_for_ready(deadline.saturating_duration_since(Instant::now()));
     let daemon = match result {
         Ok(daemon) => daemon,
         Err(err) => {
             let exit = child.try_wait().ok().flatten();
-            stop_starting_child(&mut child);
+            // A paused or delayed launcher can time out after another client
+            // has already reused its daemon. Even absent discovery is not safe
+            // cancellation authority: publication can race any final probe.
+            disown_daemon(child);
             return Err(err.context(match exit {
                 Some(status) => format!("daemon child exited during startup: {status}"),
                 None => "daemon child failed to become ready".into(),
             }));
         }
     };
-    if daemon.info.pid != child.id() {
-        // Another concurrent starter won the lock. Never stop that daemon.
-        stop_starting_child(&mut child);
-    }
-    if let Some(port) = args.port.filter(|port| *port != 0) {
-        if daemon.status.ws_port != port {
-            if daemon.info.pid == child.id() {
-                stop_starting_child(&mut child);
-            }
-            anyhow::bail!(
-                "daemon started on ws port {}, expected {port}",
-                daemon.status.ws_port
-            );
-        }
-    }
+    // A concurrent starter may have won the daemon lock. Losing children
+    // exit on that lock themselves; neither a caller error nor a snapshot of
+    // another daemon authorizes killing a child that can become shared.
     disown_daemon(child);
+    if let Some(port) = args.port.filter(|port| *port != 0) {
+        anyhow::ensure!(
+            daemon.status.ws_port == port,
+            "daemon started on ws port {}, expected {port}",
+            daemon.status.ws_port
+        );
+    }
     Ok(daemon.info)
 }
 
@@ -211,17 +217,6 @@ fn disown_daemon(mut child: DaemonChild) {
 #[cfg(not(unix))]
 fn disown_daemon(child: DaemonChild) {
     drop(child);
-}
-
-fn stop_starting_child(child: &mut DaemonChild) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-    if let Err(err) = child.kill() {
-        warn!(error = %err, "failed to stop daemon child after startup failure");
-        return;
-    }
-    let _ = child.wait();
 }
 
 /// `bsk daemon stop` entrypoint.
@@ -1149,6 +1144,173 @@ fn send_kill(_pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A gated real daemon makes the launcher/other-client interleaving
+    // deterministic, without test hooks or timing knobs in the shipped CLI.
+    #[test]
+    #[ignore = "subprocess entry point"]
+    fn lifecycle_daemon_process() {
+        let home = paths::bsk_home().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !home.join("resume-child").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "test did not release daemon gate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut config = DaemonConfig::new(0);
+        config.daemon_idle = Duration::from_secs(10);
+        run_foreground(config).unwrap();
+    }
+
+    fn gated_daemon() -> DaemonChild {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "daemon::start::tests::lifecycle_daemon_process",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let home = paths::bsk_home().unwrap();
+        #[cfg(not(windows))]
+        {
+            command
+                .env("HOME", home)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        }
+        #[cfg(windows)]
+        {
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| {
+                    let key = key.to_string_lossy();
+                    !key.eq_ignore_ascii_case("HOME") && !key.eq_ignore_ascii_case("USERPROFILE")
+                })
+                .collect();
+            env.push(("HOME".into(), home.as_os_str().to_owned()));
+            env.push(("USERPROFILE".into(), home.into_os_string()));
+            let input = std::fs::File::open("NUL").unwrap();
+            let output = std::fs::File::options().write(true).open("NUL").unwrap();
+            crate::windows_process::spawn(
+                command.get_program(),
+                &windows::command_line(
+                    std::iter::once(command.get_program()).chain(command.get_args()),
+                ),
+                &env,
+                [&input, &output, &output],
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+            )
+            .unwrap()
+        }
+    }
+
+    struct StopTestDaemon;
+
+    impl Drop for StopTestDaemon {
+        fn drop(&mut self) {
+            // Also release the gated fixture on an assertion failure. Its idle
+            // timeout bounds its lifetime if it cannot be reached for cleanup.
+            release_test_daemon();
+            let _ = probe::wait_for_ready(Duration::from_secs(1));
+            let _ = run_stop();
+        }
+    }
+
+    fn release_test_daemon() {
+        std::fs::write(paths::bsk_home().unwrap().join("resume-child"), []).unwrap();
+    }
+
+    #[test]
+    fn launcher_timeout_preserves_daemon_reused_by_another_client() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::launcher_timeout_preserves_daemon_reused_by_another_client"
+            ),
+            || {
+                let _cleanup = StopTestDaemon;
+                let child = gated_daemon();
+                // Launcher A has spawned the child but is not allowed to continue
+                // its readiness wait until client B has successfully reused it.
+                release_test_daemon();
+                let ready = probe::wait_for_ready(Duration::from_secs(5)).unwrap();
+                let pid = ready.info.pid;
+                drop(ready);
+                run_start(StartArgs::default()).unwrap();
+                // Resume A with an expired budget, exactly as after SIGSTOP/SIGCONT.
+                let error =
+                    wait_for_background(child, &StartArgs::default(), Instant::now()).unwrap_err();
+                assert!(format!("{error:#}").contains("failed to become ready"));
+                let Probe::Ready(after) = probe::probe(Duration::from_secs(1)).unwrap() else {
+                    panic!("launcher timeout killed the daemon already reused by B");
+                };
+                assert_eq!(after.status.pid, pid);
+            },
+        );
+    }
+
+    #[test]
+    fn launcher_timeout_before_publication_allows_child_to_finish() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::launcher_timeout_before_publication_allows_child_to_finish"
+            ),
+            || {
+                let _cleanup = StopTestDaemon;
+                let child = gated_daemon();
+                assert!(!paths::info_path().unwrap().exists());
+                assert!(wait_for_background(child, &StartArgs::default(), Instant::now()).is_err());
+                // Absence of discovery at the deadline is not cancellation authority:
+                // the daemon can publish immediately afterwards and become shared.
+                release_test_daemon();
+                let ready = probe::wait_for_ready(Duration::from_secs(5)).unwrap();
+                let pid = ready.status.pid;
+                drop(ready);
+                run_start(StartArgs::default()).unwrap();
+                let Probe::Ready(after) = probe::probe(Duration::from_secs(1)).unwrap() else {
+                    panic!("daemon must be reusable after the launcher's timeout");
+                };
+                assert_eq!(after.status.pid, pid);
+            },
+        );
+    }
+
+    #[test]
+    fn launcher_port_mismatch_preserves_shared_daemon() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::launcher_port_mismatch_preserves_shared_daemon"
+            ),
+            || {
+                let _cleanup = StopTestDaemon;
+                let child = gated_daemon();
+                release_test_daemon();
+                let ready = probe::wait_for_ready(Duration::from_secs(5)).unwrap();
+                let pid = ready.status.pid;
+                let wrong_port = (ready.status.ws_port % u16::MAX) + 1;
+                drop(ready);
+                run_start(StartArgs::default()).unwrap();
+                let args = StartArgs {
+                    port: Some(wrong_port),
+                    ..Default::default()
+                };
+                let error =
+                    wait_for_background(child, &args, Instant::now() + Duration::from_secs(3))
+                        .unwrap_err();
+                assert!(format!("{error:#}").contains("expected"));
+                let Probe::Ready(after) = probe::probe(Duration::from_secs(1)).unwrap() else {
+                    panic!("a caller's port mismatch killed the shared daemon");
+                };
+                assert_eq!(after.status.pid, pid);
+            },
+        );
+    }
 
     #[cfg(unix)]
     #[test]

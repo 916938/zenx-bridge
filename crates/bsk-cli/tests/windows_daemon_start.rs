@@ -23,8 +23,8 @@ use windows_sys::Win32::System::JobObjects::{
     QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
 
 const BUDGET: Duration = Duration::from_secs(8);
@@ -229,13 +229,12 @@ impl Fixture {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // Isolate our fixture from a breakaway-capable CI runner's Job.
-            // Test Jobs below are assigned explicitly before the gate opens.
-            .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+            // Preserve the test host's Job policy. The independent-host CI
+            // suite supplies a verified Job-free host; rejection tests also
+            // run directly inside the ordinary runner's restrictive Job.
+            .creation_flags(CREATE_NO_WINDOW);
         let started = Instant::now();
-        let mut child = command
-            .spawn()
-            .expect("test host must allow a process outside its own Job");
+        let mut child = command.spawn().expect("create gated test launcher");
         for job in jobs {
             job.assign(&child);
         }

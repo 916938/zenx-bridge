@@ -34,6 +34,11 @@ Query commands retain their existing automatic-start behavior. Set
 `BSK_AUTO_START=0` for probes that must not start a daemon, regardless of whether
 stdout is a terminal or a pipe.
 
+The startup deadline limits how long the initiating command waits. It does not
+cancel a running daemon: another caller may already be using that service, or
+it may finish publishing immediately after the deadline. Initialization errors
+exit in the daemon itself; use `bsk daemon stop` for an explicit shutdown.
+
 ## 1. Reuse or choose the daemon directory
 
 For an existing daemon, reuse its `BSK_HOME` and OS user, or its default directory
