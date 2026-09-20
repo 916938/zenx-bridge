@@ -289,15 +289,14 @@ async function refreshHelpTargets(
 }
 
 async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
-  if (help.deps.notifications) {
-    await help.deps.notifications.clear(help.notificationId).catch(() => {});
-  }
   const tabsToCancel = new Set([help.primaryTabId, ...help.overlayTabIds]);
-  await Promise.all(
-    [...tabsToCancel].map((tabId) =>
+  // A stalled notification must not prevent cancellation of the page overlays.
+  await Promise.all([
+    ...[...tabsToCancel].map((tabId) =>
       help.deps.sendToTab(tabId, { type: HELP_CANCEL, requestId: help.requestId }).catch(() => {}),
     ),
-  );
+    help.deps.notifications?.clear(help.notificationId).catch(() => {}),
+  ]);
 }
 
 /** Never let best-effort UI cleanup hold the daemon RPC open indefinitely. */
