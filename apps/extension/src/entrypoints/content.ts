@@ -44,6 +44,7 @@ import {
   type OverlayAgentOverlayResetMessage,
   type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
+  shouldApplyOverlayAgentState,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import {
@@ -231,6 +232,7 @@ export default defineContentScript({
     }
 
     function applyOverlayState(state: OverlayAgentStateMessage): void {
+      if (!shouldApplyOverlayAgentState(activeAgentState, state)) return;
       if (overlays.snapshot().activeSessionId !== state.sessionId) inputPassthrough.reset();
       activeAgentState = state;
       overlays.applyAgentControlMode(state.sessionId, state.mode);
