@@ -147,6 +147,9 @@ export async function withInputReady<T extends object>(
   try {
     checkActive();
     deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
+    // A persistent lease owns focus emulation for dispatcher-controlled tools;
+    // unowned direct-handler paths retain the bounded 0.3.0 fallback below.
+    const persistentLease = deps.cdp.ownsBackgroundExecution?.(ctx.sessionId, tabId) === true;
     const visibility = await waitForInputReply(
       deps.cdp.send<{ result: { value?: string } }>(tabId, "Runtime.evaluate", {
         expression: "document.visibilityState",
@@ -160,6 +163,12 @@ export async function withInputReady<T extends object>(
     if (cancelled) return cancelled;
     checkActive();
     if (visibility.result.value === "hidden") {
+      if (persistentLease)
+        return {
+          code: "cdp_failed",
+          message: "Input target is hidden despite an owned background-execution lease",
+          data: { reason: "input_not_ready", effect_state: "none" },
+        };
       attachmentId = deps.cdp.getAttachmentId?.(tabId);
       // Mark ownership before awaiting: a failed reply may still have enabled it.
       restoreFocus = true;

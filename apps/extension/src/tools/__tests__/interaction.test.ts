@@ -694,6 +694,7 @@ describe("click input readiness", () => {
       rendered?: () => boolean | Promise<boolean>;
       defaultTimeoutMs?: number;
       onCommand?: (method: string, params: Record<string, unknown>) => void;
+      ownsBackgroundExecution?: boolean;
     } = {},
   ) {
     const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
@@ -716,6 +717,9 @@ describe("click input readiness", () => {
     );
     let attachmentId: string | undefined = "original";
     fake.cdp.getAttachmentId = () => attachmentId;
+    if (options.ownsBackgroundExecution !== undefined) {
+      fake.cdp.ownsBackgroundExecution = vi.fn(() => options.ownsBackgroundExecution as boolean);
+    }
     return {
       ...fake,
       ctx,
@@ -745,6 +749,36 @@ describe("click input readiness", () => {
     expect(await f.click()).not.toHaveProperty("code");
     expect(f.focusCommands()).toEqual([]);
     expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it("samples visibility without changing an existing persistent background lease", async () => {
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => "visible",
+    });
+    expect(await f.click()).not.toHaveProperty("code");
+    expect(f.cdp.ownsBackgroundExecution).toHaveBeenCalledWith("aa11", 4);
+    expect(
+      f.sent.some(
+        (c) =>
+          c.method === "Runtime.evaluate" &&
+          (c.params as { expression?: string }).expression === "document.visibilityState",
+      ),
+    ).toBe(true);
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+    expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it("rejects hidden leased input before dispatch without toggling its focus override", async () => {
+    const f = await fixture({ ownsBackgroundExecution: true, visibility: () => "hidden" });
+    expect(await f.click()).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_ready", effect_state: "none" },
+    });
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+    expect(f.mouseCommands()).toEqual([]);
   });
 
   it("wakes even an active-but-hidden page before geometry, then restores after release", async () => {

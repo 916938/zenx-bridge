@@ -63,6 +63,8 @@ export interface CdpRunner {
   getAttachmentId?(tabId: number): string | undefined;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
+  /** Whether this session requests the persistent override, regardless of applied CDP state. */
+  ownsBackgroundExecution?(sessionId: string, tabId: number): boolean;
   trackSessionTab?(sessionId: string, tabId: number): void;
   releaseSessionTab?(sessionId: string, tabId: number): Promise<void>;
   onEvent?(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
