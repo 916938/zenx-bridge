@@ -32,13 +32,14 @@ import type {
   NetworkResult,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
-import { CdpReadTimeoutError, isRendererRead, runCdpCommand } from "./command-deadline";
+import { CdpReadGate, CdpReadTimeoutError, READ_TIMEOUT_MS } from "./command-deadline";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
   type CdpFrameTreeNode,
   type CdpFrameTreeSource,
   type CdpTarget,
+  omitFrameSubtrees,
 } from "./frame-graph";
 
 export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
@@ -143,6 +144,7 @@ interface FrameDiscoveryState {
   pending: Set<Promise<void>>;
   generation: number;
   enabled: Map<string, Promise<void>>;
+  frameIds: Map<string, string>;
 }
 
 async function settleBeforeDeadline(promises: Promise<void>[], deadline: number): Promise<boolean> {
@@ -166,10 +168,8 @@ async function settleBeforeDeadline(promises: Promise<void>[], deadline: number)
  */
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
+  private readonly readGate = new CdpReadGate();
   private readonly attachedTabs = new Set<number>();
-  /** Timed-out reads still running in Chrome, per tab. New reads are refused
-   * while one is pending so they do not queue behind the stuck command. */
-  private readonly stuckReads = new Map<number, Set<Promise<unknown>>>();
   private readonly attachmentIds = new Map<number, string>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly detachInFlight = new Map<number, Promise<void>>();
@@ -315,10 +315,15 @@ export class ChromiumCdp {
     }
   }
 
-  async sendToTarget<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T> {
+  async sendToTarget<T = unknown>(
+    target: CdpTarget,
+    method: string,
+    params?: object,
+    readTimeoutMs?: number,
+  ): Promise<T> {
     await this.ensureAttached(target.tabId);
     try {
-      return (await this.command(target, method, params ?? {})) as T;
+      return (await this.command(target, method, params ?? {}, readTimeoutMs)) as T;
     } catch (err) {
       throw normalizeError(err);
     }
@@ -334,10 +339,22 @@ export class ChromiumCdp {
     await this.drainFrameAttachTasks(tabId);
 
     const sources: CdpFrameTreeSource[] = [];
+    const unavailable = new Map<string, CdpTarget>();
+    const isolateChildTimeout = (error: unknown, target: CdpTarget) => {
+      if (!(error instanceof CdpReadTimeoutError)) return;
+      const frameId =
+        target.sessionId && this.frameDiscovery.get(tabId)?.frameIds.get(target.sessionId);
+      // A root timeout also gates child reads. Never mistake it for a local
+      // child failure, or guess ownership when discovery has no frame identity.
+      if (!frameId || frameId === sources[0]?.tree.frame.id || error.sessionId !== target.sessionId)
+        throw error;
+      unavailable.set(frameId, target);
+    };
     const root = await this.sendToTarget<{ frameTree?: CdpFrameTreeNode }>(
       { tabId },
       "Page.getFrameTree",
       {},
+      READ_TIMEOUT_MS,
     );
     if (root.frameTree) sources.push({ target: { tabId }, tree: root.frameTree });
 
@@ -350,10 +367,13 @@ export class ChromiumCdp {
             target,
             "Page.getFrameTree",
             {},
+            READ_TIMEOUT_MS,
           );
+          if (reply.frameTree)
+            this.frameDiscovery.get(tabId)?.frameIds.set(sessionId, reply.frameTree.frame.id);
           return reply.frameTree ? { target, tree: reply.frameTree } : null;
         } catch (err) {
-          rethrowReadTimeout(err);
+          isolateChildTimeout(err, target);
           return null;
         }
       }),
@@ -362,8 +382,9 @@ export class ChromiumCdp {
       if (source) sources.push(source);
     }
 
-    const graph = buildFrameGraph(sources);
-    if (!graph) throw new Error("Page.getFrameTree returned no root frame");
+    const discovered = buildFrameGraph(sources);
+    if (!discovered) throw new Error("Page.getFrameTree returned no root frame");
+    const graph = omitFrameSubtrees(discovered, unavailable);
     const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
     await Promise.all(
       graph.frames.map(async (frame) => {
@@ -379,11 +400,11 @@ export class ChromiumCdp {
           if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
         } catch (err) {
           // The frame may have navigated between tree capture and owner lookup.
-          rethrowReadTimeout(err);
+          isolateChildTimeout(err, parent.target);
         }
       }),
     );
-    return graph;
+    return omitFrameSubtrees(discovered, unavailable);
   }
 
   /** Return a cursor marking the current dialog sequence for `tabId`. */
@@ -601,7 +622,7 @@ export class ChromiumCdp {
     this.networkDomainsEnabledTabs.clear();
     this.networkRequestMeta.clear();
     this.frameDiscovery.clear();
-    this.stuckReads.clear();
+    this.readGate.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
         try {
@@ -613,27 +634,17 @@ export class ChromiumCdp {
     );
   }
 
-  private command(target: CdpDebuggee, method: string, params: object): Promise<unknown> {
-    const tabId = target.tabId;
-    const rendererRead = tabId !== undefined && isRendererRead(method);
-    if (rendererRead && this.stuckReads.get(tabId)?.size)
-      return Promise.reject(CdpReadTimeoutError.stillPending(method, tabId));
-    return runCdpCommand(
+  private command(
+    target: CdpDebuggee,
+    method: string,
+    params: object,
+    readTimeoutMs?: number,
+  ): Promise<unknown> {
+    return this.readGate.run(
       target,
       method,
       () => this.api.sendCommand(target, method, params),
-      (pending) => {
-        if (!rendererRead) return;
-        const stuck = this.stuckReads.get(tabId) ?? new Set<Promise<unknown>>();
-        this.stuckReads.set(tabId, stuck);
-        stuck.add(pending);
-        const settle = () => {
-          stuck.delete(pending);
-          if (stuck.size === 0 && this.stuckReads.get(tabId) === stuck)
-            this.stuckReads.delete(tabId);
-        };
-        void pending.then(settle, settle);
-      },
+      readTimeoutMs,
     );
   }
 
@@ -684,15 +695,32 @@ export class ChromiumCdp {
     // Auto-attach remains enabled for this debugger session, including later
     // navigation and new iframes. Reconfiguring it on every observation adds a
     // browser round trip and needlessly repeats child-target discovery.
-    const work = this.command(target, "Target.setAutoAttach", {
-      autoAttach: true,
-      waitForDebuggerOnStart: false,
-      flatten: true,
-      filter: [{ type: "iframe", exclude: false }],
-    })
+    let issued = false;
+    const work = this.readGate
+      .run(target, "Target.setAutoAttach", () => {
+        issued = true;
+        return this.api
+          .sendCommand(target, "Target.setAutoAttach", {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+            filter: [{ type: "iframe", exclude: false }],
+          })
+          .then(
+            () => {
+              if (state.enabled.get(key) === work) state.enabled.set(key, Promise.resolve());
+            },
+            (error) => {
+              if (state.enabled.get(key) === work) state.enabled.delete(key);
+              throw error;
+            },
+          );
+      })
       .then(() => {})
       .catch((error) => {
-        if (state.enabled.get(key) === work) state.enabled.delete(key);
+        // Keep a timed-out configuration until Chrome actually settles it.
+        if ((!issued || !(error instanceof CdpReadTimeoutError)) && state.enabled.get(key) === work)
+          state.enabled.delete(key);
         throw error;
       });
     state.enabled.set(key, work);
@@ -724,14 +752,20 @@ export class ChromiumCdp {
       if (method === "Target.detachedFromTarget") {
         const state = this.frameDiscovery.get(tabId);
         state?.enabled.delete(sessionId);
+        state?.frameIds.delete(sessionId);
+        this.readGate.reset(tabId, sessionId);
         if (state?.sessions.delete(sessionId)) state.generation += 1;
         return;
       }
       if (method !== "Target.attachedToTarget") return;
-      const targetInfo = raw.targetInfo as { type?: string } | undefined;
+      const targetInfo = raw.targetInfo as { type?: string; targetId?: string } | undefined;
       if (targetInfo?.type && targetInfo.type !== "iframe") return;
 
       const state = this.frameDiscoveryState(tabId);
+      // Chromium iframe target IDs are their DevTools frame tokens. Remember
+      // this before the first tree read so an unresponsive OOPIF can be omitted.
+      if (targetInfo?.type === "iframe" && typeof targetInfo.targetId === "string")
+        state.frameIds.set(sessionId, targetInfo.targetId);
       if (state.sessions.has(sessionId)) return;
       state.sessions.add(sessionId);
       state.generation += 1;
@@ -748,9 +782,8 @@ export class ChromiumCdp {
     };
   }
 
-  /** Child sessions stay attached in Chrome after their configuration timed
-   * out. Only the configuration needs another attempt, and it joins the same
-   * bounded drain as newly attached targets. */
+  /** A late real failure may clear a previously timed-out configuration.
+   * Retry it under the same bounded drain as newly attached targets. */
   private retryChildFrameDiscovery(tabId: number): void {
     const state = this.frameDiscovery.get(tabId);
     if (!state) return;
@@ -770,8 +803,8 @@ export class ChromiumCdp {
     } catch (err) {
       if (err instanceof CdpReadTimeoutError) {
         // The command is still in flight and Chrome keeps the child session
-        // attached. Keep it registered so the next observation retries the
-        // configuration instead of losing the frame until the next reattach.
+        // attached. Keep both the session and the pending configuration until
+        // Chrome settles it instead of resending or losing the frame.
         console.debug("[bsk cdp] child frame discovery timed out", { target });
         return;
       }
@@ -814,6 +847,7 @@ export class ChromiumCdp {
       pending: new Set(),
       generation: 0,
       enabled: new Map(),
+      frameIds: new Map(),
     };
     this.frameDiscovery.set(tabId, created);
     return created;
@@ -821,8 +855,7 @@ export class ChromiumCdp {
 
   private clearFrameState(tabId: number): void {
     this.frameDiscovery.delete(tabId);
-    // Detaching discards the stuck command in Chrome.
-    this.stuckReads.delete(tabId);
+    this.readGate.reset(tabId);
   }
 
   private bindDialogHandler(): void {
