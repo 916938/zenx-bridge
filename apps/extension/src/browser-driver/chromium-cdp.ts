@@ -32,6 +32,7 @@ import type {
   NetworkResult,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
+import { runCdpCommand } from "./command-deadline";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
@@ -141,6 +142,7 @@ interface FrameDiscoveryState {
   sessions: Set<string>;
   pending: Set<Promise<void>>;
   generation: number;
+  enabled: Map<string, Promise<void>>;
 }
 
 async function settleBeforeDeadline(promises: Promise<void>[], deadline: number): Promise<boolean> {
@@ -303,7 +305,7 @@ export class ChromiumCdp {
   async send<T = unknown>(tabId: number, method: string, params?: object): Promise<T> {
     await this.ensureAttached(tabId);
     try {
-      const result = await this.api.sendCommand({ tabId }, method, params ?? {});
+      const result = await this.command({ tabId }, method, params ?? {});
       return result as T;
     } catch (err) {
       throw normalizeError(err);
@@ -313,7 +315,7 @@ export class ChromiumCdp {
   async sendToTarget<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T> {
     await this.ensureAttached(target.tabId);
     try {
-      return (await this.api.sendCommand(target, method, params ?? {})) as T;
+      return (await this.command(target, method, params ?? {})) as T;
     } catch (err) {
       throw normalizeError(err);
     }
@@ -601,8 +603,12 @@ export class ChromiumCdp {
     );
   }
 
+  private command(target: CdpDebuggee, method: string, params: object): Promise<unknown> {
+    return runCdpCommand(target, method, () => this.api.sendCommand(target, method, params));
+  }
+
   private async enablePageDomain(tabId: number): Promise<void> {
-    await this.api.sendCommand({ tabId }, "Page.enable", {});
+    await this.command({ tabId }, "Page.enable", {});
   }
 
   private async enableConsoleDomains(tabId: number): Promise<void> {
@@ -615,7 +621,7 @@ export class ChromiumCdp {
     let failed = false;
     for (const method of ["Runtime.enable", "Log.enable"]) {
       try {
-        await this.api.sendCommand({ tabId }, method, {});
+        await this.command({ tabId }, method, {});
       } catch (err) {
         failed = true;
         console.debug("[bsk cdp] console domain enable failed", { tabId, method, err });
@@ -628,7 +634,7 @@ export class ChromiumCdp {
 
   private async enableNetworkDomain(tabId: number): Promise<void> {
     if (this.networkDomainsEnabledTabs.has(tabId)) return;
-    await this.api.sendCommand({ tabId }, "Network.enable", {});
+    await this.command({ tabId }, "Network.enable", {});
     this.networkDomainsEnabledTabs.add(tabId);
   }
 
@@ -640,13 +646,27 @@ export class ChromiumCdp {
     }
   }
 
-  private async enableFrameDiscovery(target: CdpTarget): Promise<void> {
-    await this.api.sendCommand(target, "Target.setAutoAttach", {
+  private enableFrameDiscovery(target: CdpTarget): Promise<void> {
+    const state = this.frameDiscoveryState(target.tabId);
+    const key = target.sessionId ?? "root";
+    const existing = state.enabled.get(key);
+    if (existing) return existing;
+    // Auto-attach remains enabled for this debugger session, including later
+    // navigation and new iframes. Reconfiguring it on every observation adds a
+    // browser round trip and needlessly repeats child-target discovery.
+    const work = this.command(target, "Target.setAutoAttach", {
       autoAttach: true,
       waitForDebuggerOnStart: false,
       flatten: true,
       filter: [{ type: "iframe", exclude: false }],
-    });
+    })
+      .then(() => {})
+      .catch((error) => {
+        if (state.enabled.get(key) === work) state.enabled.delete(key);
+        throw error;
+      });
+    state.enabled.set(key, work);
+    return work;
   }
 
   private bindFrameTargetHandler(): void {
@@ -673,6 +693,7 @@ export class ChromiumCdp {
 
       if (method === "Target.detachedFromTarget") {
         const state = this.frameDiscovery.get(tabId);
+        state?.enabled.delete(sessionId);
         if (state?.sessions.delete(sessionId)) state.generation += 1;
         return;
       }
@@ -739,6 +760,7 @@ export class ChromiumCdp {
       sessions: new Set(),
       pending: new Set(),
       generation: 0,
+      enabled: new Map(),
     };
     this.frameDiscovery.set(tabId, created);
     return created;
@@ -778,7 +800,7 @@ export class ChromiumCdp {
       if (parsed.type === "prompt") {
         handleParams.promptText = parsed.defaultPrompt ?? "";
       }
-      await this.api.sendCommand({ tabId }, "Page.handleJavaScriptDialog", handleParams);
+      await this.command({ tabId }, "Page.handleJavaScriptDialog", handleParams);
       if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
       const sequence = (this.dialogSequences.get(tabId) ?? 0) + 1;
       this.dialogSequences.set(tabId, sequence);
