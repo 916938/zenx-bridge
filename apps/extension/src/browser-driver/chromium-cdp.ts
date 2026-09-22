@@ -32,7 +32,7 @@ import type {
   NetworkResult,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
-import { CdpReadTimeoutError, runCdpCommand } from "./command-deadline";
+import { CdpReadTimeoutError, isRendererRead, runCdpCommand } from "./command-deadline";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
@@ -167,6 +167,9 @@ async function settleBeforeDeadline(promises: Promise<void>[], deadline: number)
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
   private readonly attachedTabs = new Set<number>();
+  /** Timed-out reads still running in Chrome, per tab. New reads are refused
+   * while one is pending so they do not queue behind the stuck command. */
+  private readonly stuckReads = new Map<number, Set<Promise<unknown>>>();
   private readonly attachmentIds = new Map<number, string>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly detachInFlight = new Map<number, Promise<void>>();
@@ -598,6 +601,7 @@ export class ChromiumCdp {
     this.networkDomainsEnabledTabs.clear();
     this.networkRequestMeta.clear();
     this.frameDiscovery.clear();
+    this.stuckReads.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
         try {
@@ -610,7 +614,27 @@ export class ChromiumCdp {
   }
 
   private command(target: CdpDebuggee, method: string, params: object): Promise<unknown> {
-    return runCdpCommand(target, method, () => this.api.sendCommand(target, method, params));
+    const tabId = target.tabId;
+    const rendererRead = tabId !== undefined && isRendererRead(method);
+    if (rendererRead && this.stuckReads.get(tabId)?.size)
+      return Promise.reject(CdpReadTimeoutError.stillPending(method, tabId));
+    return runCdpCommand(
+      target,
+      method,
+      () => this.api.sendCommand(target, method, params),
+      (pending) => {
+        if (!rendererRead) return;
+        const stuck = this.stuckReads.get(tabId) ?? new Set<Promise<unknown>>();
+        this.stuckReads.set(tabId, stuck);
+        stuck.add(pending);
+        const settle = () => {
+          stuck.delete(pending);
+          if (stuck.size === 0 && this.stuckReads.get(tabId) === stuck)
+            this.stuckReads.delete(tabId);
+        };
+        void pending.then(settle, settle);
+      },
+    );
   }
 
   private async enablePageDomain(tabId: number): Promise<void> {
@@ -797,6 +821,8 @@ export class ChromiumCdp {
 
   private clearFrameState(tabId: number): void {
     this.frameDiscovery.delete(tabId);
+    // Detaching discards the stuck command in Chrome.
+    this.stuckReads.delete(tabId);
   }
 
   private bindDialogHandler(): void {
