@@ -289,7 +289,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
               additionalProperties: false,
               properties: {
                 urlContains: { type: "string" },
-                urlMatches: { type: "string" },
+                urlMatches: {
+                  type: "string",
+                  description: "RE2-compatible URL regex (max 2048 characters).",
+                },
                 selectorExists: { type: "string" },
                 selectorMissing: { type: "string" },
                 textExists: { type: "string" },
@@ -304,7 +307,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
               additionalProperties: false,
               properties: {
                 urlContains: { type: "string" },
-                urlMatches: { type: "string" },
+                urlMatches: {
+                  type: "string",
+                  description: "RE2-compatible URL regex (max 2048 characters).",
+                },
                 selectorExists: { type: "string" },
                 selectorMissing: { type: "string" },
                 textExists: { type: "string" },
