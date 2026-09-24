@@ -154,18 +154,6 @@ export interface DispatcherDeps {
   helpNotificationCopy?: () => { title: string; body: string };
 }
 
-/** Tools whose page input can make the page open another tab or window. */
-const OPENS_TABS = new Set([
-  "tool.click",
-  "tool.press",
-  "tool.evaluate",
-  "tool.navigate",
-  "tool.navigate_back",
-  "tool.navigate_forward",
-  "tool.fill",
-  "tool.select",
-]);
-
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
  * appropriate tool implementation.
