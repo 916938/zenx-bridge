@@ -135,6 +135,12 @@ pnpm ext:test
 | `214b1eb` → `307a116` | 2026-09-25 | fix(daemon): let navigation timeout results outlive the transport deadline |
 | `6a97ac0` → `1bf0740` | 2026-09-25 | fix(cli): isolate Windows daemon startup from caller jobs（detach 链基础：`windows_process.rs`、`daemon/start/windows.rs`、Job breakaway 验证；干净合入，我方对相关文件零改动） |
 | `58eb44b` → `286d6f5` | 2026-09-25 | fix(cli): preserve shared daemons after launcher timeout（detach 链后续，随 `6a97ac0` 一并移植） |
+| `14afdbc` → `ae88a1a` | 2026-09-25 | fix(extension): preserve popup observation tails and safe cleanup（仅 `session.ts` 的 2 行对我方有效，popup 主体随 task-popups 跳过；在我方树上为行为等价改动） |
+| `8519221` → `d7c5bfc` | 2026-09-25 | fix(extension): bound renderer reads and stop fallback reads after a timeout |
+| `a317bf8` → `aff018b` | 2026-09-25 | fix(extension): keep frame discovery consistent after a read timeout |
+| `e262457` → `f88afc5` | 2026-09-25 | fix(extension): refuse renderer reads while a timed-out read is still running（去掉属 `9cde489` 的 `claimAttempts`/`attachmentVersions` 字段声明） |
+| `ad6dd44` → `c021ffb` | 2026-09-25 | fix(extension): preserve read budgets and isolate stalled frame reads（`stuckReads` 被上游重构为 `CdpReadGate`；测试冲突只保留导航预算用例，"bounded debugger cleanup" 两个用例依赖未移植的 `80dd02a`） |
+| `cba47d4` → `5a40f6b` | 2026-09-25 | fix(extension): retain observations after optional root layout timeout |
 
 **Windows 生命周期测试的运行环境**：`windows_daemon_start` / `windows_update` 的多数用例要求宿主进程**不在限制性 Job 内**。在 IDE/沙箱 shell 里直接 `cargo test` 会因 `Access is denied (os error 5)`（breakaway 被拒）大片失败，属环境限制而非代码问题。正确跑法：`powershell -File scripts/test-windows-daemon.ps1`（与 CI 相同的 WMI 独立宿主，2026-09-25 全绿；偶发 `launcher did not exit within 8s` 超时重跑即可）。
 
@@ -145,6 +151,8 @@ pnpm ext:test
 | `abf0d3a` | 与上游"可恢复会话启动"功能线（`session-starts.ts`、`start-journal.ts`，`8e357f3`）深度耦合，我方未携带该功能 |
 | `80dd02a` | 依赖上游任务 UI 功能线（`task-preview.ts`、`ui-activity.ts`、`claimAttempts`，`9cde489`/`a15e857`），我方未携带 |
 | `345d703` / `69dfd06` | 均修复上游 browser rename 功能（`05db608`），我方未携带 |
+| `7b74596` / `7478e08` / `64245fb` | popup 观察/归因线（`task-popups.ts`、`observedTabs`、`releaseObservedTab`），我方整体未携带该子系统；`7b74596` 曾试挑后 revert（残余部分离开 `task-popups` 即为死代码）。若需要 popup 归因，应整条吸收 `7478e08` 起的功能线 |
+| `9cde489` | 任务 UI 线（引入 `claimAttempts`/`attachmentVersions`），且被 `80dd02a` 依赖 |
 
 **教训**：上游 0.3.1 的修复大量挂在功能线（可恢复启动、任务 UI/rename）上，逐修复 cherry-pick 的命中率低。下次同步前应先决定是否整条吸收某个功能线，再批量移植。
 
@@ -153,7 +161,8 @@ pnpm ext:test
 ## 6. 已知失败
 
 - `cargo test -p bsk --test remote_server`：Windows 上 1–2 例不稳定失败（`authorization_file_contention_does_not_block_socket_messages` 断言 401 vs 503；`sixty_four_online_browsers_leave_http_exchange_capacity_available` 报 `Access is denied (os error 5)`）。该测试文件与 `daemon/remote/**` 均相对上游零改动，属 Windows 文件争用语义差异；按 §4 该项不在我们的支持范围，不修。
-- 其余目标全绿（2026-09-19：`cargo test --workspace --no-fail-fast` 仅此 1 个 target 失败；`pnpm ext:test` 2062 passed / 103 skipped / 0 failed，127 files）。
+- `pnpm --filter @916938/zenx-bridge-dsh-plugin test`：`tests/skill.test.ts` 2 例 + `tests/lazy-tools.test.ts` 7 例失败（2026-09-25 在同步前基线 `e908115` 上复现，属**既有失败**，非同步引入）。上游有对应修复（`2eee76f` `963f694` `a4ac06e` `e1a4018` `6f6e09e` lazy-tool 重挂线），待评估其与未移植功能线的耦合后单独移植。
+- 其余目标全绿（2026-09-25：`cargo test --workspace --no-fail-fast` 仅 remote_server 失败；`pnpm ext:test` 2106 passed / 103 skipped / 0 failed，129 files；`scripts/test-windows-daemon.ps1` WMI 宿主全绿）。
 
 ---
 
