@@ -133,17 +133,20 @@ pnpm ext:test
 | `eb91433` → `53126fc` | 2026-09-25 | fix(extension): bound request-help cleanup wait |
 | `bfa5e52` → `e2dfaa9` | 2026-09-25 | fix: preserve startup ownership and isolate pending cleanup（`AgentWindowApi.create` 改返回 `{windowId, initialTabIds}`；冲突合并保留我方 `allocatingAgentWindows`/`pendingAgentWindows`；dsh 侧去掉依赖未移植功能的 `requestFor` 行；我方两个 fork 测试的 mock 与旧断言随之更新） |
 | `214b1eb` → `307a116` | 2026-09-25 | fix(daemon): let navigation timeout results outlive the transport deadline |
+| `6a97ac0` → `1bf0740` | 2026-09-25 | fix(cli): isolate Windows daemon startup from caller jobs（detach 链基础：`windows_process.rs`、`daemon/start/windows.rs`、Job breakaway 验证；干净合入，我方对相关文件零改动） |
+| `58eb44b` → `286d6f5` | 2026-09-25 | fix(cli): preserve shared daemons after launcher timeout（detach 链后续，随 `6a97ac0` 一并移植） |
+
+**Windows 生命周期测试的运行环境**：`windows_daemon_start` / `windows_update` 的多数用例要求宿主进程**不在限制性 Job 内**。在 IDE/沙箱 shell 里直接 `cargo test` 会因 `Access is denied (os error 5)`（breakaway 被拒）大片失败，属环境限制而非代码问题。正确跑法：`powershell -File scripts/test-windows-daemon.ps1`（与 CI 相同的 WMI 独立宿主，2026-09-25 全绿；偶发 `launcher did not exit within 8s` 超时重跑即可）。
 
 #### 2026-09-25 跳过及原因（重评估入口）
 
 | 提交 | 原因 |
 |------|------|
-| `58eb44b` | 依赖上游 windows-daemon-detach 重构链（`windows_process.rs`、Job/WMI 子进程模型，`c2d0c7e` 等），我方基线未携带。若决定吸收 Windows daemon detach 整条链，可一并移植 |
 | `abf0d3a` | 与上游"可恢复会话启动"功能线（`session-starts.ts`、`start-journal.ts`，`8e357f3`）深度耦合，我方未携带该功能 |
 | `80dd02a` | 依赖上游任务 UI 功能线（`task-preview.ts`、`ui-activity.ts`、`claimAttempts`，`9cde489`/`a15e857`），我方未携带 |
 | `345d703` / `69dfd06` | 均修复上游 browser rename 功能（`05db608`），我方未携带 |
 
-**教训**：上游 0.3.1 的修复大量挂在三条功能线（Windows detach、可恢复启动、任务 UI/rename）上，逐修复 cherry-pick 的命中率低。下次同步前应先决定是否整条吸收某个功能线，再批量移植。
+**教训**：上游 0.3.1 的修复大量挂在功能线（可恢复启动、任务 UI/rename）上，逐修复 cherry-pick 的命中率低。下次同步前应先决定是否整条吸收某个功能线，再批量移植。
 
 ---
 
