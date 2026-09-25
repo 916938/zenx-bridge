@@ -141,6 +141,18 @@ pnpm ext:test
 | `e262457` → `f88afc5` | 2026-09-25 | fix(extension): refuse renderer reads while a timed-out read is still running（去掉属 `9cde489` 的 `claimAttempts`/`attachmentVersions` 字段声明） |
 | `ad6dd44` → `c021ffb` | 2026-09-25 | fix(extension): preserve read budgets and isolate stalled frame reads（`stuckReads` 被上游重构为 `CdpReadGate`；测试冲突只保留导航预算用例，"bounded debugger cleanup" 两个用例依赖未移植的 `80dd02a`） |
 | `cba47d4` → `5a40f6b` | 2026-09-25 | fix(extension): retain observations after optional root layout timeout |
+| `7f4685d` → `8e7261d` | 2026-09-25 | fix(extension): treat overlay host as the click blocker |
+| `8334b16` → `5e09b13` | 2026-09-25 | fix(extension): accept lowercase special keys in press |
+| `225f5fe` → `9e4b393` | 2026-09-25 | fix(extension): treat ARIA loading tokens as case-insensitive |
+| `46800bd` → `f27cb85` | 2026-09-25 | fix(extension): return visible labels from select |
+| `ece2953` → `6717156` | 2026-09-25 | fix(extension): prevent control overlay from swallowing clicks（去掉属 `7478e08` 的 `deps.onInputSent` 调用） |
+| `f446536` → `80e9258` | 2026-09-25 | fix(extension): scope click passthrough to control surfaces（新增 `click-overlay.ts`；`InteractionDeps` 改为继承 `ClickOverlayDeps`，接口上去掉 `onInputSent` 字段） |
+| `d426a40` → `f499b0f` | 2026-09-25 | fix(extension): expire orphaned click passthrough leases |
+| `531a1fa` → `e385b57` | 2026-09-25 | fix(extension): reserve time for click delivery before lease expiry |
+| `03f8561` → `5a1d816` + `f5ce66f` | 2026-09-25 | fix(extension): attribute new-tab downloads through the clicked tab。**注意**：该提交在上游早于 click-passthrough 链（不是 `f446536` 的祖先），按日期顺序挑会破坏链；`f5ce66f` 用上游 main 终版（已含两条线的合并结果）修复，并重贴 ZenX Bridge 品牌 |
+
+> **排序教训**：`git log` 默认按提交日期而非拓扑排序。挑多个提交前必须用
+> `git merge-base --is-ancestor A B` 确认真实次序，否则会造成本条这类"后挑的提交 revert 掉先挑的重构"。
 
 **Windows 生命周期测试的运行环境**：`windows_daemon_start` / `windows_update` 的多数用例要求宿主进程**不在限制性 Job 内**。在 IDE/沙箱 shell 里直接 `cargo test` 会因 `Access is denied (os error 5)`（breakaway 被拒）大片失败，属环境限制而非代码问题。正确跑法：`powershell -File scripts/test-windows-daemon.ps1`（与 CI 相同的 WMI 独立宿主，2026-09-25 全绿；偶发 `launcher did not exit within 8s` 超时重跑即可）。
 
@@ -161,8 +173,19 @@ pnpm ext:test
 ## 6. 已知失败
 
 - `cargo test -p bsk --test remote_server`：Windows 上 1–2 例不稳定失败（`authorization_file_contention_does_not_block_socket_messages` 断言 401 vs 503；`sixty_four_online_browsers_leave_http_exchange_capacity_available` 报 `Access is denied (os error 5)`）。该测试文件与 `daemon/remote/**` 均相对上游零改动，属 Windows 文件争用语义差异；按 §4 该项不在我们的支持范围，不修。
-- `pnpm --filter @916938/zenx-bridge-dsh-plugin test`：`tests/skill.test.ts` 2 例 + `tests/lazy-tools.test.ts` 7 例失败（2026-09-25 在同步前基线 `e908115` 上复现，属**既有失败**，非同步引入）。上游有对应修复（`2eee76f` `963f694` `a4ac06e` `e1a4018` `6f6e09e` lazy-tool 重挂线），待评估其与未移植功能线的耦合后单独移植。
-- 其余目标全绿（2026-09-25：`cargo test --workspace --no-fail-fast` 仅 remote_server 失败；`pnpm ext:test` 2106 passed / 103 skipped / 0 failed，129 files；`scripts/test-windows-daemon.ps1` WMI 宿主全绿）。
+- `pnpm --filter @916938/zenx-bridge-dsh-plugin test`：`tests/skill.test.ts` 2 例 + `tests/lazy-tools.test.ts` 7 例失败（2026-09-25 在同步前基线 `e908115` 上复现，属**既有失败**，非同步引入）。
+
+  **lazy-tools 修复组评估结论（2026-09-25，已实测并回滚，判定为「未修复」）**：
+
+  | 评估项 | 结论 |
+  |--------|------|
+  | 范围 | `2eee76f` → `e1a4018` → `a4ac06e` → `963f694`（线性链，全部只动 dsh 插件），另需 `start-journal.ts`（自包含，来自 `8e357f3`）作测试 fixture |
+  | 场景对应 | 对应：lazy-tools 7 例（`armLazyTools`/`hasSuccessfulSkillInvocation`/`apply()` 接线）确实就是这批修复覆盖的场景 |
+  | 修复前 | 9 例失败（skill 2 + lazy-tools 7） |
+  | 修复后 | **33 例失败**：新代码与新测试针对 dsh SDK `0.1.5-rc.3`，我方装在 `0.1.0-rc.6`；叠加 SDK 升级提交 `b8b744a` 后仍失败（客户端组件等还需上游更多迁移提交） |
+  | 结论 | **未修复，且不可孤立移植**。这 9 例的修复入口是整条 dsh SDK `0.1.0-rc.6 → 0.1.5-rc.3` 迁移线，是独立于本次同步的工程项，需单独立项评估（含 `plugin-id.test.ts` 的 Cordis 插件 id 断言） |
+- 其余目标全绿（2026-09-25：`cargo test --workspace --no-fail-fast` 仅 remote_server 失败；`pnpm ext:test` 2169 passed / 104 skipped / 0 failed，131 files；`scripts/test-windows-daemon.ps1` WMI 宿主全绿）。
+- `src/long-screenshot/*` 两个用例在全量并发跑时偶发失败，单独重跑通过（负载相关，非回归）。
 
 ---
 
