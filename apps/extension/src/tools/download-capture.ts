@@ -383,8 +383,13 @@ export async function captureBrowserDownload(
     );
     if (isRpcError(triggered)) {
       void completion.catch(() => undefined);
+      // No download event yet does not undo a click already delivered to the page.
       const effect: TransferEffectState =
-        capturedId !== undefined ? "committed" : intent || popupUrls.size > 0 ? "unknown" : "none";
+        capturedId !== undefined
+          ? "committed"
+          : dispatched || intent || popupUrls.size > 0
+            ? "unknown"
+            : "none";
       failureResult = {
         ...triggered,
         data: { ...triggered.data, effect_state: effect, phase: "trigger" },
