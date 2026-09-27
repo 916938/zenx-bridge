@@ -543,8 +543,13 @@ export class ChromiumCdp {
     };
   }
 
-  /** Detach if attached; never throws. */
-  async detach(tabId: number): Promise<void> {
+  /** Detach if attached; never throws. Skips when `expectedAttachmentId` no longer matches. */
+  async detach(tabId: number, expectedAttachmentId?: string): Promise<void> {
+    if (
+      expectedAttachmentId !== undefined &&
+      this.getAttachmentId(tabId) !== expectedAttachmentId
+    )
+      return;
     const existing = this.detachInFlight.get(tabId);
     if (existing) {
       await existing;

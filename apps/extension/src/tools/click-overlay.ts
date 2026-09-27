@@ -15,6 +15,8 @@ export interface ClickOverlayDeps {
   /** Acquire/release only this operation's automation bypass reference. */
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   sendInputPassthrough?: InputPassthroughSendToTab;
+  /** Let a bounded operation release these resources without waiting for input replies. */
+  registerClickCleanup?: (cleanup: () => Promise<void>) => () => void;
 }
 
 type OverlayHit = "absent" | "clear" | "covered" | "unknown";
@@ -29,7 +31,29 @@ export async function withClickOverlay<T>(
 ): Promise<T | RpcError> {
   const send = deps.sendInputPassthrough ?? sendInputPassthrough;
   let bypass = false;
+  let bypassAcquisition: Promise<void> | undefined;
   let passthroughId: string | undefined;
+  let retired = false;
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanup = () => {
+    retired = true;
+    // Outer retirement and a late inner finally share one release of each resource.
+    cleanupPromise ??= (async () => {
+      const results = await Promise.allSettled([
+        (async () => {
+          if (passthroughId)
+            await send(tabId, { type: INPUT_PASSTHROUGH, phase: "end", id: passthroughId });
+        })(),
+        (async () => {
+          await bypassAcquisition;
+          if (bypass) await deps.bypassOverlay!(tabId, false);
+        })(),
+      ]);
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+    })();
+    return cleanupPromise;
+  };
+  const unregisterCleanup = deps.registerClickCleanup?.(cleanup);
   let passthroughExpiresAt = Infinity;
   const expired = () => Date.now() >= passthroughExpiresAt;
   // Reserve one second for input delivery; completed clicks still use the full lease.
@@ -73,14 +97,16 @@ export async function withClickOverlay<T>(
     return "unknown";
   };
   try {
-    if (deps.signal?.aborted) return cancelled();
+    if (retired || deps.signal?.aborted) return cancelled();
     let hit = await probe();
     let covered = hit === "covered";
-    if (deps.signal?.aborted) return cancelled();
+    if (retired || deps.signal?.aborted) return cancelled();
     if ((alwaysBypass || covered) && deps.bypassOverlay) {
       try {
-        await deps.bypassOverlay(tabId, true);
-        bypass = true;
+        bypassAcquisition = deps.bypassOverlay(tabId, true).then(() => {
+          bypass = true;
+        });
+        await bypassAcquisition;
       } catch (error) {
         console.debug("[bsk click] overlay bypass enable failed", error);
       }
@@ -88,7 +114,7 @@ export async function withClickOverlay<T>(
       hit = await probe();
       covered ||= hit === "covered";
     }
-    if (deps.signal?.aborted) return cancelled();
+    if (retired || deps.signal?.aborted) return cancelled();
     if (hit === "covered") {
       passthroughId = crypto.randomUUID();
       // Start before sending, so our deadline cannot outlive the content-side lease.
@@ -100,7 +126,7 @@ export async function withClickOverlay<T>(
       }
       hit = await probe();
     }
-    if (deps.signal?.aborted) return cancelled();
+    if (retired || deps.signal?.aborted) return cancelled();
     if (pressDeadlineReached() || hit === "covered" || (covered && hit === "unknown"))
       return notReady();
     const result = await click(async () => {
@@ -126,20 +152,12 @@ export async function withClickOverlay<T>(
     }
     return result;
   } finally {
-    // Release our lease even if begin's acknowledgement was lost.
-    if (passthroughId) {
-      try {
-        await send(tabId, { type: INPUT_PASSTHROUGH, phase: "end", id: passthroughId });
-      } catch (error) {
-        console.debug("[bsk click] overlay passthrough restore failed", error);
-      }
-    }
-    if (bypass) {
-      try {
-        await deps.bypassOverlay!(tabId, false);
-      } catch (error) {
-        console.debug("[bsk click] overlay bypass restore failed", error);
-      }
+    try {
+      await cleanup();
+    } catch (error) {
+      console.debug("[bsk click] overlay restore failed", error);
+    } finally {
+      unregisterCleanup?.();
     }
   }
 }

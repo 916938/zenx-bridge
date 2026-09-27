@@ -13,7 +13,12 @@ type Send = <T = Record<string, unknown>>(
 ) => Promise<T>;
 
 async function browser(
-  run: (send: Send, cdp: ChromiumCdp, sessionId: () => string) => Promise<void>,
+  run: (
+    send: Send,
+    cdp: ChromiumCdp,
+    sessionId: () => string,
+    api: CdpDebuggerApi,
+  ) => Promise<void>,
 ) {
   const { withChrome } = await import(
     new URL(
@@ -54,7 +59,7 @@ async function browser(
       };
       const cdp = new ChromiumCdp(api);
       try {
-        await run(send, cdp, () => activeSession);
+        await run(send, cdp, () => activeSession, api);
       } finally {
         await cdp.detach(7);
       }
@@ -99,19 +104,26 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("download trigger retirement", ()
         release = resolve;
       });
       const inputs: string[] = [];
-      const wrapped: CdpRunner = {
-        send: (async (tabId: number, method: string, params?: object) => {
-          const value = await cdp.send(tabId, method, params);
-          if (method === "Input.dispatchMouseEvent") {
-            const type = (params as { type: string }).type;
-            inputs.push(type);
-            if (type === heldType) {
-              reached();
-              await reply;
-            }
+      const holdReply = async <T>(
+        method: string,
+        params: object | undefined,
+        value: T,
+      ): Promise<T> => {
+        if (method === "Input.dispatchMouseEvent") {
+          const type = (params as { type: string }).type;
+          inputs.push(type);
+          if (type === heldType) {
+            reached();
+            await reply;
           }
-          return value;
-        }) as CdpRunner["send"],
+        }
+        return value;
+      };
+      const wrapped: CdpRunner = {
+        send: async (tabId, method, params) =>
+          holdReply(method, params, await cdp.send(tabId, method, params)),
+        sendGuarded: async (target, method, params, guard) =>
+          holdReply(method, params, await cdp.sendGuarded(target, method, params, guard)),
         detach: cdp.detach.bind(cdp),
         getAttachmentId: cdp.getAttachmentId.bind(cdp),
         onEvent: () => ({ dispose() {} }),
@@ -169,6 +181,113 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("download trigger retirement", ()
       } finally {
         release({});
         await pending;
+      }
+    });
+  }, 40_000);
+
+  it("does not deliver a queued mouse move after cancellation during reattachment", async () => {
+    await browser(async (_send, cdp, _sessionId, api) => {
+      const sessions = manager();
+      const ctx = await sessions.start("download-reattach");
+      await cdp.send(7, "Runtime.evaluate", {
+        expression: `
+          document.body.innerHTML = '<button id="export" style="width:200px;height:100px">Export</button>';
+          window.moves = 0; window.startedExports = 0;
+          document.addEventListener('mousemove', () => { window.moves++; });
+          document.querySelector('#export').onclick = () => { window.startedExports++; };
+        `,
+      });
+      const abort = new AbortController();
+      let release!: () => void;
+      let reached!: () => void;
+      let settled!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const ready = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const inputSettled = new Promise<void>((resolve) => {
+        settled = resolve;
+      });
+      const attach = api.attach;
+      const sendCommand = api.sendCommand;
+      const inputs: string[] = [];
+      api.sendCommand = (target, method, params) => {
+        if (method === "Input.dispatchMouseEvent") inputs.push((params as { type: string }).type);
+        return sendCommand(target, method, params);
+      };
+      let interceptMove = true;
+      const wrapped: CdpRunner = {
+        send: cdp.send.bind(cdp),
+        sendGuarded: async (target, method, params, guard) => {
+          if (method === "Input.dispatchMouseEvent" && interceptMove) {
+            interceptMove = false;
+            await cdp.detach(7);
+            api.attach = async (target, version) => {
+              await attach(target, version);
+              reached();
+              await held;
+            };
+            try {
+              return await cdp.sendGuarded(target, method, params, guard);
+            } finally {
+              settled();
+            }
+          }
+          return cdp.sendGuarded(target, method, params, guard);
+        },
+        detach: cdp.detach.bind(cdp),
+        getAttachmentId: cdp.getAttachmentId.bind(cdp),
+        onEvent: () => ({ dispose() {} }),
+      };
+      const event = () => ({ addListener() {}, removeListener() {} });
+      const pending = handleDownload(
+        sessions,
+        {
+          session_id: ctx.sessionId,
+          tab_id: 7,
+          selector: "#export",
+          browser_relative_dir: "BrowserSkill/reattach",
+          timeout_ms: 2_000,
+        },
+        {
+          cdp: wrapped,
+          tabsApi,
+          signal: abort.signal,
+          navigationTargets: { onCreatedNavigationTarget: event() },
+          downloads: {
+            onCreated: event(),
+            onChanged: event(),
+            onDeterminingFilename: event(),
+            search: async () => [],
+            cancel: async () => {},
+            removeFile: async () => {},
+          },
+        },
+      );
+      try {
+        await ready;
+        abort.abort();
+        expect(await pending).toHaveProperty("code");
+        expect(inputs).toEqual([]);
+        release();
+        await inputSettled;
+        expect(inputs).toEqual([]);
+        const { result } = await cdp.send<{ result: { value: number[] } }>(7, "Runtime.evaluate", {
+          expression: "[moves, startedExports]",
+          returnByValue: true,
+        });
+        expect(result.value).toEqual([0, 0]);
+        console.log(
+          "DOWNLOAD_REATTACH_PROOF",
+          JSON.stringify({ inputs, moves: result.value[0], startedExports: result.value[1] }),
+        );
+      } finally {
+        abort.abort();
+        release();
+        await pending;
+        api.attach = attach;
       }
     });
   }, 40_000);
