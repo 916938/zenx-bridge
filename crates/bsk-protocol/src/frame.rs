@@ -94,8 +94,9 @@ impl<'de> Deserialize<'de> for ResponseFrame {
         #[derive(Deserialize)]
         struct Flat {
             id: RpcId,
-            #[serde(default, deserialize_with = "de_result_field")]
+            #[serde(default, deserialize_with = "de_present_field")]
             result: Option<serde_json::Value>,
+            #[serde(default, deserialize_with = "de_present_field")]
             error: Option<RpcError>,
         }
 
@@ -115,13 +116,14 @@ impl<'de> Deserialize<'de> for ResponseFrame {
     }
 }
 
-// Preserve field presence: an explicit null is Some(Value::Null), while
-// #[serde(default)] leaves a missing result as None.
-fn de_result_field<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+// Deserialize present fields as their actual type: Value accepts null, but
+// RpcError requires an error object. Missing fields use #[serde(default)].
+fn de_present_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    serde_json::Value::deserialize(deserializer).map(Some)
+    T::deserialize(deserializer).map(Some)
 }
 
 impl Serialize for Frame {
@@ -351,6 +353,18 @@ mod tests {
         for wire in [
             r#"{"id":"rpc-6","result":null,"result":1}"#,
             r#"{"id":"rpc-6","result":1,"result":null}"#,
+        ] {
+            assert!(serde_json::from_str::<Frame>(wire).is_err());
+            assert!(serde_json::from_str::<ResponseFrame>(wire).is_err());
+        }
+    }
+
+    #[test]
+    fn null_error_is_rejected() {
+        for wire in [
+            r#"{"id":"rpc-null-error","error":null}"#,
+            r#"{"id":"rpc-null-error","result":null,"error":null}"#,
+            r#"{"id":"rpc-null-error","result":true,"error":null}"#,
         ] {
             assert!(serde_json::from_str::<Frame>(wire).is_err());
             assert!(serde_json::from_str::<ResponseFrame>(wire).is_err());
