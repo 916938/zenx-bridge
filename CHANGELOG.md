@@ -36,6 +36,10 @@ which distribution you are running. See `docs/UPSTREAM_SYNC.md`.
 
 - Protocol: preserve explicit `null` results when deserializing `ResponseFrame`,
   restoring round-trip consistency while rejecting responses with both a result and an error.
+- Daemon: calls waiting on an extension connection that reconnects or closes now fail
+  at once instead of hanging until their timeout; inputs, transfers and tab borrows keep
+  their unknown-outcome errors. `bsk doctor` and `bsk browsers` flag a connected
+  extension that has stopped sending heartbeats.
 
 ## [0.3.0] - 2026-09-16
 
