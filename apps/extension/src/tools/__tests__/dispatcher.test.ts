@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import type { ConnectionStateHandler, FrameHandler, Transport } from "@/transport/transport";
 import type {
@@ -386,6 +387,102 @@ describe("ToolDispatcher", () => {
       vi.mocked(cdp.send).mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent"),
     ).toHaveLength(6);
     dispatcher.stop();
+  });
+
+  it("recovers a leased click after Chrome drops the applied focus override", async () => {
+    const tab = { id: 7, windowId: 4242, active: false, url: "https://example.test" };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e1", 12, { tabId: 7 });
+    // Chrome's actual override, independent of BackgroundExecution's applied-state cache.
+    let emulated = false;
+    const toggles: boolean[] = [];
+    let pointerEvents = 0;
+    const chromeEvent = {
+      addListener: () => {},
+      removeListener: () => {},
+    } as unknown as CdpDebuggerApi["onEvent"];
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method, params) => {
+        const p = (params ?? {}) as { enabled?: boolean; expression?: string };
+        if (method === "Emulation.setFocusEmulationEnabled") {
+          emulated = p.enabled === true;
+          toggles.push(emulated);
+          return {};
+        }
+        if (method === "Runtime.evaluate" && p.expression === "document.visibilityState")
+          return { result: { value: emulated ? "visible" : "hidden" } };
+        // Animation frames run only while the page is visible.
+        if (method === "Runtime.evaluate" && p.expression?.includes("requestAnimationFrame"))
+          return { result: { value: emulated } };
+        if (method === "DOM.getContentQuads") return { quads: [[0, 0, 40, 0, 40, 20, 0, 20]] };
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [0, 0, 40, 0, 40, 20, 0, 20] } };
+        if (method === "Page.getLayoutMetrics")
+          return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        if (method === "Runtime.evaluate")
+          return {
+            result: { value: { overlayHostPresent: false, overlayHostConnected: false } },
+          };
+        if (method === "Input.dispatchMouseEvent") {
+          if (!emulated) throw new Error("input sent to a hidden page");
+          pointerEvents++;
+        }
+        return {};
+      }),
+      onEvent: chromeEvent,
+      onDetach: chromeEvent as unknown as CdpDebuggerApi["onDetach"],
+    };
+    const cdp = new ChromiumCdp(api);
+    const { transport, sent, deliver } = fakeTransport();
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    const click = async (count: number) => {
+      deliver(makeRequest("tool.click", { session_id: "aa11", ref: "e1" }));
+      await vi.waitFor(() => expect(sent).toHaveLength(count));
+      return sent[count - 1];
+    };
+    try {
+      expect(await click(1)).toMatchObject({ result: { tab_id: 7, used_ref: "e1" } });
+      expect(toggles).toEqual([true]);
+      expect(pointerEvents).toBe(3);
+
+      // Turned off outside the cache, e.g. from the service worker.
+      emulated = false;
+      expect(await click(2)).toMatchObject({ result: { tab_id: 7, used_ref: "e1" } });
+      expect(toggles).toEqual([true, true]);
+      expect(pointerEvents).toBe(6);
+      expect(emulated).toBe(true);
+      expect(cdp.ownsBackgroundExecution("aa11", 7)).toBe(true);
+      expect(
+        vi
+          .mocked(api.sendCommand)
+          .mock.calls.some(([, method]) => method === "Page.captureScreenshot"),
+      ).toBe(false);
+
+      // The restored override stays with the lease for the next tool.
+      expect(await click(3)).toMatchObject({ result: { tab_id: 7, used_ref: "e1" } });
+      expect(toggles).toEqual([true, true]);
+      expect(pointerEvents).toBe(9);
+    } finally {
+      dispatcher.stop();
+      cdp.dispose();
+    }
   });
 
   it("wires the production tab APIs into tool.session_stop so a surviving user tab releases the window", async () => {

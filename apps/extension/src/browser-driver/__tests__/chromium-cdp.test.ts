@@ -1354,6 +1354,53 @@ describe("controlled background execution", () => {
     await cdp.detachSession("agent");
     cdp.dispose();
   });
+
+  it("resends an owned override that the applied cache still reports active", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    const toggles = () =>
+      vi
+        .mocked(api.sendCommand)
+        .mock.calls.filter(([, method]) => method === "Emulation.setFocusEmulationEnabled")
+        .map(([, , params]) => (params as { enabled: boolean }).enabled);
+    await cdp.acquireBackgroundExecution("agent", 4);
+    await cdp.send(4, "Runtime.evaluate", {});
+    expect(toggles()).toEqual([true]);
+    await cdp.restoreBackgroundExecution("agent", 4);
+    expect(toggles()).toEqual([true, true]);
+    await expect(cdp.restoreBackgroundExecution("other", 4)).rejects.toThrow("not owned");
+    expect(toggles()).toEqual([true, true]);
+    await cdp.releaseSessionTab("agent", 4);
+    expect(toggles()).toEqual([true, true, false]);
+    await expect(cdp.restoreBackgroundExecution("agent", 4)).rejects.toThrow("not owned");
+    expect(toggles()).toEqual([true, true, false]);
+    cdp.dispose();
+  });
+
+  it("still disables on release after a failed resend", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.acquireBackgroundExecution("agent", 4);
+    // A passive reader keeps the attachment, so only the disable command can restore focus.
+    cdp.trackSessionTab("reader", 4);
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method, params) => {
+      if (
+        method === "Emulation.setFocusEmulationEnabled" &&
+        (params as { enabled: boolean }).enabled
+      )
+        throw new Error("resend failed");
+      return {};
+    });
+    await expect(cdp.restoreBackgroundExecution("agent", 4)).rejects.toThrow("resend failed");
+    await cdp.releaseSessionTab("agent", 4);
+    expect(api.sendCommand).toHaveBeenLastCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      { enabled: false },
+    );
+    expect(api.detach).not.toHaveBeenCalled();
+    cdp.dispose();
+  });
 });
 
 it("detaches on failed policy release even when a passive reader remains", async () => {
