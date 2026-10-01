@@ -154,6 +154,69 @@ pnpm ext:test
 > **排序教训**：`git log` 默认按提交日期而非拓扑排序。挑多个提交前必须用
 > `git merge-base --is-ancestor A B` 确认真实次序，否则会造成本条这类"后挑的提交 revert 掉先挑的重构"。
 
+### 5.3 2026-10-02 批次（上游 `fa953dc` → `3f10983`，含 0.3.1 / 0.3.2）
+
+同步基线仍是上次合并基线 `fa953dc`；上游 main 由 `147727a` 前进到 `3f10983`，共 210 个提交（其中 135 个非合并提交，`git cherry` 判定 11 个已在上一批次接过）。全树 merge 会产生约 50 个文件冲突（`.gitattributes`、`ci.yml`、`Cargo.toml`、`background.ts`、`popup/App.tsx`、`Dispatcher.ts`、`method.rs`、`i18n` 等），仍按 §3.1 走定向 cherry-pick。
+
+**已移植（34 个 cherry-pick + 2 个适配提交）**：
+
+| 提交 | 内容 |
+|------|------|
+| `d247cb7` → `dfba428` | fix(extension): decouple help overlay and notification cleanup |
+| `2ba4629` → `04d2456` | docs(skill): say that page content is data, never instructions |
+| `f10c72a` → `67caa5f` | docs(skill): judge injection by authorization, not by action type |
+| `3274e64` → `9be78fa` | docs(skill): trim guidance and fix CLI tool references |
+| `1e58dd1` → `32b2428` | docs(skill): fit guidance within the merged prompt budget |
+| `2100bd7` → `89f4aa4` | fix(record): record a page reload instead of dropping it as a same-URL navigation |
+| `76f45c6` → `83d15cd` | test(cli): use blocking streams in daemon probe fixtures |
+| `fb896db` → `816c4a9` | fix(extension): keep collapsed help actions readable in all locales |
+| `f0688d9` → `800d56e` | fix: stabilize full-page screenshots at fractional DPI and in background tabs |
+| `74c307d` → `211c623` | fix(cli): scope doctor skill status to bundled version |
+| `dcb43e5` → `c9c1f19` | fix(extension): stop recordings whose current tab cannot host the overlay |
+| `032b115` → `7de9687` | fix(cli): clear stale recording state when its session is gone |
+| `45ff673` → `10c2931` | fix(cli): scope recording state cleanup to its own session |
+| `57dd73f` → `a1e0b1e` | fix(ipc): decode explicit null results and stop silent null degradation |
+| `d850292` → `fff5224` | fix(protocol): scope null result decoding to ResponseFrame |
+| `5c0bb72` → `4be8ade` | fix(protocol): reject null error fields in response frames |
+| `b01ad7c` → `11a906b` | fix(dsh-plugin): reconnect the observation stream after a fatal failure |
+| `d102adc` → `6fd7ecb` | fix(dsh-plugin): track observation stream outages explicitly |
+| `8f485ab` → `8a6a56d` | fix(dsh-plugin): show observation outages on the collapsed capsule |
+| `67629e8` → `c2067dc` | fix(emulate): scope remembered overrides to the session and attachment |
+| `d7f7fb9` → `bb4bb59` | fix(extension): ignore stale overlay state by generation |
+| `8e85b3e` → `4f660b1` | fix(input): honor persistent background execution leases |
+| `58b50f9` → `b881ee2` | docs(changelog): note calls settling on extension reconnect |
+| `00c1f18` → `0ae6a27` | fix(download): bound trigger lifetime and retire cancelled input（CI 冲突：上游 step 与我方既有 step 并存） |
+| `78bd77e` → `736d8cf` | test(download): run cancellation regression in its own CI job（去掉引用上游 dsh 包名与 `scripts/check-dsh-package.mjs` 的 job） |
+| `7efe13a` → `0f96967` | fix(download): preserve dispatched effects when the trigger fails（CI step 合并） |
+| `c8269cc` → `6563799` | fix(click): emit every press in a DOM multi-click sequence（CI 取我方分 step 写法） |
+| `fa18d3c` → `da16399` | fix(vom): preserve page actions beside nonmodal sidebars |
+| `995f790` → `48f15d2` | fix(input): restore a dropped background lease before hidden input（代码取上游终版 `reapply()`，CHANGELOG 保留我方） |
+| `b967b27` → `1838d01` | fix(download): fence dispatch and retire owned overlay resources（`chromium-cdp.ts` 保留我方，见下方适配提交） |
+| `c61ae62` → `2285a94` | fix(extension): 防止 request-help URL 正则回溯阻塞（引入 `re2js` 依赖；丢弃上游 `references/help-and-recovery.md`） |
+| `9ff0036` → `c5215cd` | fix(extension): 按维护者反馈约束 request-help URL 正则资源（同上） |
+| `145d4fa` → `7f40a7b` | fix(extension): 按条件累计 URL 正则预算并防止轮询重叠（同上） |
+| `4fde56f` → `58e38ff` | fix(vom): tolerate viewport rounding and honor AX modality（先补上同一批的 follow-up 提交后才干净合入） |
+| — (`6bcb324`) | chore(extension): 补回 `b967b27` 依赖的 `CdpDispatchGuard` / `sendGuarded` / `command(beforeDispatch)`，但不引入属 `9cde489` 的 `attachmentVersions` |
+| — (`17a7182`) | docs(skill): build.rs 重新生成的 `crates/bsk-cli/skill/SKILL.md` 副本 |
+
+#### 2026-10-02 跳过及原因（重评估入口）
+
+| 提交 | 原因 |
+|------|------|
+| `fd5aeee` / `83cc415` | 下载 target-blank 的**早期**实现（`expectedUrl`），已被上游终版（我方 `5a1d816`+`f5ce66f` 落的 `popupUrls`/`markDispatched`）取代，再挑会把终版代码回退到早期写法 |
+| `2fc2704` | 给 session.stop 方案加 `requestId`，依赖未携带的 durable stop 恢复线（`abf0d3a`） |
+| `2aca02a` | 依赖 `overlay-version.ts` 与 `popupSnapshotRefreshers`（popup 归因线），我方用 `overlayGeneration` 计数器 |
+| `ca02b26` / `a6c3498` / `bedcf90` | 依赖 `start_session_recoverable`、`preserve_cleanup`、`unresponsive` 标记（可恢复会话启动线 `8e357f3` / `abf0d3a`）；`bedcf90` 单独有 30 个冲突块 / 11 文件，需先整条吸收该线 |
+| `507522f` / `72986b2` | 上游把启动恢复提示抽成 `daemon/start_error.rs` 模块，我方内联在 `cli/ensure_daemon.rs` / `cli/doctor.rs`，单独挑需连带引入该模块与全部接线 |
+| `fc7561b` `1c74821` `15c0bab` `eb9b142` `b56bb43` `77b78b8` `c7c3693` `b3b133e` `d691cc1` | Windows 自更新/接管链（9 提交）。我方 `cli/update.rs` 与上游终版相差 1566 行（含我方 release 源），且引入新的 `update/state.rs`、`daemon/start/handover.rs`。属 feature 级改造 + 发布链路风险，**建议单独立项**而不是搭在本轮同步里 |
+| `b4c41ee` `f443309` `6f6e09e` `a965e6d` `bbde2d7` `2b01a15` `bf5a8d9` `ccaa317` `b8b744a` | dsh 插件（runner 收尾、截图卡片、DSH 0.2 宿主、归档祖先）。同 §6 既有结论：dsh 测试基线即失败，真正修复入口是 SDK `0.1.0-rc.6 → 0.1.5-rc.3` 迁移线 |
+| `02e802f` `47f5765` `240bf1d` `45a3bf1` | skill 打包/reference bundles 线（`skill_install/bundle.rs`、`sync.rs`、`legacy-digests.txt`、`.gitattributes`），我方未采用该结构 |
+| `f360a34` `0ac871b` `e8c5cfc` `47cf368` `770f7a1` `8a7f280` | i18n 多语言包（新增 7 个 locale + `import.meta.glob` 自动注册），feature 线；单独挑会留下无构建入口的目录 |
+| `ceb5f65` `da0d038` `ed7f85a` `aa96082` | skill 文档改动，我方 `SKILL.md` 已按 ZenX 品牌重排章节（"Before starting a session" 等），需要的 parts 应在单独的文档轮次手工合并 |
+| `bbada7b` `dc80625` | 仅涉及 `scripts/check-crate-skill.mjs` / `check-dsh-package.mjs`，我方无对应脚本 |
+| `1e2b175` `a5d9201` `476500b` `3383a4d` | 隐私声明 / README 与版本号。README、CHANGELOG、版本号一律保留我方（§3.3）；release 提交不落在同步批次里 |
+| `a3f8200` 及其余 `feat(debug)`/`fix(debug)`（16 个） | 上游"网站排障取证据"功能线（`apps/extension/src/debug/**`、`crates/bsk-cli/src/cli/debug.rs`、`protocol/tools/debug.rs`），我方树中零这些模块，属新功能而非修复 |
+
 **Windows 生命周期测试的运行环境**：`windows_daemon_start` / `windows_update` 的多数用例要求宿主进程**不在限制性 Job 内**。在 IDE/沙箱 shell 里直接 `cargo test` 会因 `Access is denied (os error 5)`（breakaway 被拒）大片失败，属环境限制而非代码问题。正确跑法：`powershell -File scripts/test-windows-daemon.ps1`（与 CI 相同的 WMI 独立宿主，2026-09-25 全绿；偶发 `launcher did not exit within 8s` 超时重跑即可）。
 
 #### 2026-09-25 跳过及原因（重评估入口）
@@ -185,6 +248,8 @@ pnpm ext:test
   | 修复后 | **33 例失败**：新代码与新测试针对 dsh SDK `0.1.5-rc.3`，我方装在 `0.1.0-rc.6`；叠加 SDK 升级提交 `b8b744a` 后仍失败（客户端组件等还需上游更多迁移提交） |
   | 结论 | **未修复，且不可孤立移植**。这 9 例的修复入口是整条 dsh SDK `0.1.0-rc.6 → 0.1.5-rc.3` 迁移线，是独立于本次同步的工程项，需单独立项评估（含 `plugin-id.test.ts` 的 Cordis 插件 id 断言） |
 - 其余目标全绿（2026-09-25：`cargo test --workspace --no-fail-fast` 仅 remote_server 失败；`pnpm ext:test` 2169 passed / 104 skipped / 0 failed，131 files；`scripts/test-windows-daemon.ps1` WMI 宿主全绿）。
+- 2026-10-02 同步批次的验证结果：`cargo check -p bsk --locked` 通过；`scripts/test-windows-daemon.ps1` WMI 宿主全绿（startup 10 + launcher 1 + update 3）；在 IDE 内直接 `cargo test` 时 `windows_daemon_start` / `windows_update` 仍报 `Access is denied (os error 5)`，属本节已记录的环境限制。`pnpm --filter @browser-skill/extension compile` 通过；`vitest run` 2394 用例 / 2277 passed / 0 failed。
+- 本批次新增失败：无；`src/long-screenshot/png.test.ts` 的 12 万扫描线用例在并发满载时会退化为 `STACK_TRACE_ERROR`，单独重跑通过（与 §6 已记录的偶发一致）。
 - `src/long-screenshot/*` 两个用例在全量并发跑时偶发失败，单独重跑通过（负载相关，非回归）。
 
 ---
