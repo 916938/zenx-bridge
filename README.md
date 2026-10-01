@@ -432,6 +432,18 @@ View the [full changelog](CHANGELOG.md) for details on version history, new feat
 | [**v0.2.0 / v0.1.4**](https://github.com/916938/zenx-bridge/releases/tag/cli-v0.2.0) | 2026-07-17 | Dry-run mode, env var defaults, human-readable timeout, shell completion |
 | [v0.1.7 / v0.1.3](https://github.com/916938/zenx-bridge/releases/tag/cli-v0.1.7) | 2026-07-16 | `bsk invoke` command, Windows compatibility, transport improvements |
 
+## Companion repositories
+
+| Repo | Role |
+|------|------|
+| [`916938/zenx-bridge`](https://github.com/916938/zenx-bridge) | This one — CLI, daemon, extension, DSH plugin, and the **bundled** skill that `bsk install-skill` puts into agent skill directories |
+| [`916938/zenx-bridge-skill`](https://github.com/916938/zenx-bridge-skill) | The **Pro agent skill package**: helper scripts, end-to-end examples, layered reference docs, the command registry, and the reusable upstream-sync playbook + triage helper |
+| [`Tencent/BrowserSkill`](https://github.com/Tencent/BrowserSkill) | Upstream we sync from — see [docs/UPSTREAM_SYNC.md](docs/UPSTREAM_SYNC.md) |
+
+They must move together: adding or changing a fork-only command means updating
+`skill/SKILL.md` here **and** `skill/SKILL.md` / `references/command-registry.json`
+in `zenx-bridge-skill`. See [AGENTS.md](AGENTS.md#companion-repositories).
+
 ## Contributing
 
 See [AGENTS.md](AGENTS.md) for development setup, coding conventions, and CI commands.

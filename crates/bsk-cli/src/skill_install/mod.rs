@@ -1,4 +1,10 @@
 //! Install bundled or custom browser-skill instructions into agent skill directories.
+//!
+//! The bundled instructions are this repository's `skill/SKILL.md`, installed as
+//! the skill named `zenx-bridge`. The companion package — helper scripts,
+//! examples and layered reference docs, installed separately as
+//! `zenx-bridge-skill` — lives in <https://github.com/916938/zenx-bridge-skill>.
+//! A fork-only command must be documented in both; see the fork's AGENTS.md.
 
 pub mod harness;
 mod provenance;

@@ -4,6 +4,14 @@
 
 **定位：下游发行版（soft fork）。** 保留上游 remote 并持续吸收其修复，但对外身份、版本线和支持范围由我们自己定义。
 
+**两个仓库各管一半：本文件是"记录"**（这一轮挑了什么、跳过什么、验证结果如何）；
+**可执行的操作手册在兄弟仓库** —— `../zenx-bridge-skill/skill/references/upstream-sync.md`
+（流程、不可孤立移植的功能线表、验证矩阵、环境坑），配套的只读辅助脚本
+`../zenx-bridge-skill/scripts/upstream_sync.py`（`triage` / `applied` / `order` / `table`）。
+动手前先读手册，收尾时更新本文件。任一侧出现**通用性**的结论（新的失败模式、新的功能线入口、
+验证命令变化），另一侧要同步更新。仓库间的分工与互链规则见 `AGENTS.md` 的
+"Companion repositories" 一节。
+
 ---
 
 ## 1. 三项既定决策
@@ -43,11 +51,14 @@
 
 整树 merge 的代价是每次人工裁决 28 个重叠文件（含 `App.tsx`、`connection-controller.ts`、`daemon/ws.rs`、`protocol/method.rs`、`skill/SKILL.md`）。改为：
 
-1. `git fetch Tencent`
-2. 用 `git log --oneline Tencent/main --since=<上次同步日>` 列出候选
+1. `git fetch Tencent`（HTTPS 不通时改 SSH，见兄弟仓库的手册 §9）
+2. 用 `git log --oneline Tencent/main --since=<上次同步日>` 列出候选；或用
+   `python3 ../zenx-bridge-skill/scripts/upstream_sync.py triage --markdown`，
+   它一次给出每个提交的规模、是否触碰冻结路径、与我方改动的重叠度
 3. 按 §4 清单筛选：只挑 bugfix / 非 remote 的通用改进
-4. `git cherry-pick <hash>`（冲突面降到 2–3 个文件）
-5. 更新 §5 已移植清单
+4. `git cherry-pick <hash>`（冲突面降到 2–3 个文件）；挑多个前用
+   `upstream_sync.py order <hash>...` 确认真实拓扑次序
+5. 更新 §5 已移植清单（表格行可用 `upstream_sync.py table` 生成）
 
 ### 3.2 冲突热点（下次同步优先检查）
 

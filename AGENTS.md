@@ -132,6 +132,42 @@ change came from upstream. The short version:
   `since` cursor and smart labels exist only here; `zenxbrowser` and
   `browserskill-pro` depend on them and cannot run on an upstream build.
 
+## Companion repositories
+
+This repo is one of three. The others are not optional context — a change here
+usually has a counterpart in another repo, so link them instead of duplicating.
+
+| Repo | Local checkout | Contains |
+|------|----------------|----------|
+| [`916938/zenx-bridge`](https://github.com/916938/zenx-bridge) | this one (`zenx-bridge-main`) | CLI, daemon, extension, DSH plugin, the bundled `zenx-bridge` skill, and the sync record `docs/UPSTREAM_SYNC.md` |
+| [`916938/zenx-bridge-skill`](https://github.com/916938/zenx-bridge-skill) | sibling dir `../zenx-bridge-skill` | The Pro skill package: helper scripts, examples, layered references, `command-registry.json`, plus the reusable sync procedure `skill/references/upstream-sync.md` and the read-only helper `scripts/upstream_sync.py` |
+| [`Tencent/BrowserSkill`](https://github.com/Tencent/BrowserSkill) | `Tencent` git remote | Upstream; see the section above |
+
+Note the naming trap: the GitHub slug is `zenx-bridge`, but local checkouts here
+are named `zenx-bridge-main` (fork) and `zenx-bridge-skill` (skill package).
+Do not assume a directory name matches a repo name.
+
+Rules that keep the two distributable skills from drifting apart:
+
+1. **Two different skills, not two copies of one file.** `skill/SKILL.md` here is
+   `name: zenx-bridge` — embedded by `build.rs` (`crates/bsk-cli/src/skill_install/mod.rs`)
+   and installed by `bsk install-skill`. The one in the skill repo is
+   `name: zenx-bridge-skill` (Pro), installed by that repo's installer. Never
+   overwrite one with the other: they differ in depth and audience, and the
+   Pro package's tables are generated from its own `command-registry.json`.
+2. **Fork-only surface lands in both.** Adding or changing `invoke`, `templates`,
+   `completion`, `browsers close`, `--browser-id` tabs, `tab observe`, the
+   `since` cursor, profile account id or smart labels requires updating
+   `skill/SKILL.md` here **and** the Pro repo's `skill/SKILL.md` +
+   `skill/references/command-registry.json` (then regenerate with its
+   `generate_command_docs.py`).
+3. **A sync batch touches both repos.** After updating the ported/skipped tables
+   and the verification numbers in `docs/UPSTREAM_SYNC.md`, check whether the
+   procedure, the unportable-feature-lines table or the verification matrix in
+   `../zenx-bridge-skill/skill/references/upstream-sync.md` needs the same edit.
+4. **Verify flags against source, never memory.** Before documenting a command,
+   read `crates/bsk-cli/src/cli/*.rs` and `crates/bsk-protocol/schema/` here.
+
 ## Important quirks
 
 - **`wxt prepare` is required** before `tsc --noEmit` or `vitest` — it generates `.wxt/` type stubs. CI always runs it; you must too.
